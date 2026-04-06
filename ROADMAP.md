@@ -7,10 +7,11 @@
 ## Version 2.3 — Completed
 
 ### 1. Full Dataset Manager (replaces Manage Datasets wizard)
-Replaced the 4-step MsgBox wizard with a modeless sidebar UserForm showing
-all configured years (built-in and custom) in a single view. Users can view,
-add, edit, and delete dataset entries. Built-in entries are labelled
-"Built-in"; user overrides are labelled "Custom". Registry-backed persistence.
+Replaced the original 4-step MsgBox wizard with a streamlined MsgBox/InputBox
+chain showing all configured years (built-in and custom) in a single scrollable
+view. Users can view, add, edit, and delete dataset entries. Built-in entries
+are labelled "Built-in"; user overrides are labelled "Built-in*"; user-added
+years are labelled "Custom". Registry-backed persistence.
 
 ### 2. Row Colour Reset on Successful Re-Lookup
 At the start of Pass 2, all data-row interior colours are reset to xlNone
@@ -27,6 +28,7 @@ only, not accumulated history.
 The v2.3 Dataset Manager was implemented using MsgBox/InputBox chains — an
 acknowledged shortcut that does not meet the original requirement for a proper
 form-based interface. v2.3.5 replaces it with the correct implementation.
+This is an interim solution; v3.0 delivers the final full modal UserForm.
 
 **Planned behaviour:**
 A modeless floating sidebar UserForm (Option C), launched from the existing
@@ -58,14 +60,17 @@ user left it.
 **Current behaviour:**
 All rows are bucketed by year and each year is queried separately in
 sequence. Batches within a year are efficient (15 NDCs per POST), but
-years themselves are processed one at a time with no parallelism.
+years themselves are processed one at a time.
 
 **Planned behaviour:**
-Where a spreadsheet contains rows spanning multiple years, fetch all
-years concurrently rather than sequentially. Each year's batch queue
-runs independently, and results are merged into the shared API cache
-before Pass 2 begins. This will reduce total runtime proportionally to
-the number of years present.
+Where a spreadsheet contains rows spanning multiple years, pre-queue all
+years' batch lists before making any API calls, then process them in an
+interleaved sequence so results from all years are merged into the shared
+API cache before Pass 2 begins. This reduces total runtime proportionally
+to the number of years present.
+
+> **Note:** VBA is single-threaded. "Concurrent" here means interleaved
+> pre-queued batches merged before Pass 2 — not OS-level threading.
 
 ---
 
@@ -100,6 +105,10 @@ NO_RATE should be:
 - A summary line at the top shows run date/time and row count
 - The main sheet retains only rows with status OK
 
+> **Implementation note:** Delete rows in reverse order (bottom-up iteration)
+> to avoid row-index drift when rows are removed mid-pass. Alternatively,
+> collect all row indices first, then delete in a single reverse-sorted pass.
+
 ---
 
 ## Version 2.5 — Planned
@@ -129,7 +138,7 @@ v2.3.5 delivers the modeless sidebar (Option C) as the near-term solution.
 v3.0 replaces it with a full modal VBA UserForm (Option A) — a proper dialog
 with a grid, Add/Edit/Delete buttons, and native event handlers. This is the
 originally intended implementation and provides the most polished, native
-Excel feel.
+Excel feel. v3.0 supersedes the v2.3.5 sidebar; both will not coexist.
 
 **Planned behaviour:**
 - Modal dialog launched from the Manage Datasets ribbon button
@@ -137,6 +146,17 @@ Excel feel.
 - Inline or panel-based editing
 - Full event handler architecture (no MsgBox/InputBox substitutes)
 - Distinct visual treatment for Built-in vs Custom vs Override entries
+
+---
+
+## Known Issues / Tech Debt
+
+| Item | Notes |
+|------|-------|
+| `ShowDatasetManager` Dim hoisting | Variables like `dsID`, `distID`, `eType` are declared inside a `For` loop body. VBA hoists all `Dim` to procedure scope so they do not reset per iteration. Works correctly but is misleading — resolved when v2.3.5 UserForm replaces this code. |
+| `BestRecord()` sort assumption | Returns the first record where `effective_date <= dispDt`, relying on the API returning results in descending order. The POST body requests `desc` and the GET fallback requests `ORDER DESC` — assumption is valid but implicit. |
+| `DiscoverDatasetID()` exact title match | Auto-discovery matches the exact CMS dataset title string. If CMS changes their naming convention, discovery silently fails. A fuzzy-match fallback is desirable long-term. |
+| Stale `.SYNOPSIS`/`.DESCRIPTION` | Installer comment block still references "frmDatasetManager UserForm" — corrected in v2.3.5 release. |
 
 ---
 
