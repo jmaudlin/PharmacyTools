@@ -1,14 +1,29 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Installs the Pharmacy Tools Excel Add-In (NADAC Lookup) v2.3
+    Installs the Pharmacy Tools Excel Add-In (NADAC Lookup) v2.3.3
 
 .DESCRIPTION
     Builds an Excel .xlam add-in containing:
-      - modNADAC          : NADAC Lookup main module (v2.3)
-      - frmDatasetManager : Full Dataset Manager UserForm (v2.3)
+      - modNADAC          : NADAC Lookup main module (v2.3.3)
+      - frmDatasetManager : Full Dataset Manager UserForm (v2.3.3)
     Then injects a custom ribbon tab and pharmacy-bottle icon.
     Registers the add-in so it loads automatically in Excel.
+
+    v2.3.3 (2026-04-09):
+      - Fix: m_LastHttpStatus moved to module-level declarations
+        (was incorrectly placed inside HttpPost function body)
+
+    v2.3.2 (2026-04-09):
+      - Distribution UUID auto-discovered from CMS metastore at runtime.
+        Hardcoded UUIDs now serve only as a fast-path fallback; stale UUIDs
+        no longer cause 400 errors.
+      - POST 400 auto-retry: on a 400 response the add-in re-queries the
+        metastore for a fresh UUID and retries the batch once before
+        falling back to GET.
+
+    v2.3.1 hotfix (2026-04-09):
+      - 2026 dataset and distribution UUIDs hardcoded (POST now works for 2026)
 
     v2.3 changes vs v2.2:
       - Dataset Manager replaced with a proper UserForm grid showing
@@ -27,7 +42,7 @@ $ErrorActionPreference = 'Stop'
 
 Write-Host ''
 Write-Host '  =====================================================' -ForegroundColor Cyan
-Write-Host '   Pharmacy Tools Add-In  --  Installer  v2.3'          -ForegroundColor Cyan
+Write-Host '   Pharmacy Tools Add-In  --  Installer  v2.3.3'        -ForegroundColor Cyan
 Write-Host '  =====================================================' -ForegroundColor Cyan
 Write-Host ''
 
@@ -87,8 +102,11 @@ $VbaCode = @'
 Option Explicit
 
 ' --- Version ------------------------------------------------------------------
-Public  Const ADDIN_VERSION    As String = "2.3"
-Private Const ADDIN_BUILD_DATE As String = "2026-04-03"
+Public  Const ADDIN_VERSION    As String = "2.3.3"
+Private Const ADDIN_BUILD_DATE As String = "2026-04-09"
+
+' Module-level: tracks last HTTP status so callers can detect 400 vs network error
+Private m_LastHttpStatus As Long
 
 ' --- API constants ------------------------------------------------------------
 Private Const API_BASE    As String = "https://data.medicaid.gov/api/1/datastore/query/"
@@ -102,10 +120,10 @@ Public Const REG_KEY As String = "HKCU\Software\PharmacyToolsAddin\Datasets"
 
 ' --- Hardcoded annual dataset IDs ---------------------------------------------
 ' Key = year string, Value = CMS dataset UUID
-' 2026 not listed -- add via Manage Datasets when CMS publishes it.
 Public Function KnownYearIDs() As Object
     Dim d As Object : Set d = CreateObject("Scripting.Dictionary")
     d.CompareMode = 1
+    d("2026") = "fbb83258-11c7-47f5-8b18-5f8e79f7e704"
     d("2025") = "f38d0706-1239-442c-a3cc-40ef1b686ac0"
     d("2024") = "99315a95-37ac-4eee-946a-3c523b4c481e"
     d("2023") = "4a00010a-132b-4e4d-a611-543c9521280f"
@@ -118,10 +136,11 @@ End Function
 
 ' --- Hardcoded distribution UUIDs (for POST /api/1/datastore/query/{distUUID}) -
 ' Key = Dataset ID UUID, Value = Distribution UUID
-' Only 2024 and 2025 confirmed; other years use GET fallback.
+' 2024, 2025, 2026 confirmed; other years use GET fallback.
 Public Function KnownDistUUIDs() As Object
     Dim d As Object : Set d = CreateObject("Scripting.Dictionary")
     d.CompareMode = 1
+    d("fbb83258-11c7-47f5-8b18-5f8e79f7e704") = "8b801945-2507-5057-8f97-eb7586889f3d"  ' 2026
     d("f38d0706-1239-442c-a3cc-40ef1b686ac0") = "ae004d7f-5799-5de3-91ec-f1247f1a5452"  ' 2025
     d("99315a95-37ac-4eee-946a-3c523b4c481e") = "b3b205f4-e788-5ec6-a342-d889111a6c2e"  ' 2024
     Set KnownDistUUIDs = d
@@ -330,9 +349,24 @@ Public Sub RunLookup()
             End If
         End If
 
-        ' Resolve Distribution UUID
+        ' Resolve Distribution UUID -------------------------------------------------
+        ' Always query the CMS metastore for the live distribution UUID so that
+        ' dataset refreshes (which rotate the UUID) are handled automatically.
+        ' The hardcoded KnownDistUUIDs table is a session-start fast-path only.
         Dim distUUID As String : distUUID = ""
         If knownDist.Exists(dsID) Then distUUID = CStr(knownDist(dsID))
+        Application.StatusBar = "NADAC Lookup  |  Verifying " & yr & " dataset UUID..."
+        DoEvents
+        Dim freshUUID As String : freshUUID = FetchDistUUID(dsID)
+        If freshUUID <> "" Then
+            If freshUUID <> distUUID And distUUID <> "" Then
+                LogLine "  UUID rotated for " & yr & ": " & distUUID & " -> " & freshUUID
+            ElseIf distUUID = "" Then
+                LogLine "  UUID discovered for " & yr & ": " & freshUUID
+            End If
+            distUUID = freshUUID
+            knownDist(dsID) = freshUUID   ' update session cache
+        End If
 
         ' Batch-query this year's NDCs
         Dim allNDCs() As Variant : allNDCs = yearNDCs(yr).Keys
@@ -366,6 +400,20 @@ Public Sub RunLookup()
                 Dim body As String : body = BuildPostBody(bNDCs, maxDt)
                 LogLine "  POST batch " & (bi + 1) & "  NDCs=" & Join(bNDCs, ",")
                 resp = HttpPost(API_BASE & distUUID, body)
+                ' Auto-retry once on 400: re-query metastore for a fresh UUID
+                If resp = "" And m_LastHttpStatus = 400 Then
+                    LogLine "  POST 400 -- re-fetching UUID for " & yr
+                    Application.StatusBar = "NADAC Lookup  |  " & yr & " UUID refresh..."
+                    DoEvents
+                    Dim retryUUID As String : retryUUID = FetchDistUUID(dsID)
+                    If retryUUID <> "" And retryUUID <> distUUID Then
+                        LogLine "  Retrying with UUID: " & retryUUID
+                        distUUID = retryUUID
+                        knownDist(dsID) = retryUUID
+                        PauseMs RATE_MS
+                        resp = HttpPost(API_BASE & distUUID, body)
+                    End If
+                End If
                 If resp <> "" Then
                     Dim arrStr As String : arrStr = ExtractResultsArray(resp)
                     If arrStr <> "" And arrStr <> "[]" Then
@@ -621,6 +669,7 @@ End Function
 ' --- HTTP POST via WinHttp ----------------------------------------------------
 Private Function HttpPost(url As String, body As String) As String
     On Error GoTo Fail
+    m_LastHttpStatus = 0
     Dim h As Object : Set h = CreateObject("WinHttp.WinHttpRequest.5.1")
     h.Open "POST", url, False
     h.SetTimeouts 15000, 15000, 90000, 90000
@@ -628,10 +677,45 @@ Private Function HttpPost(url As String, body As String) As String
     h.SetRequestHeader "Accept", "application/json"
     h.SetRequestHeader "User-Agent", "Excel-NADAC-Addin/" & ADDIN_VERSION
     h.Send body
+    m_LastHttpStatus = h.Status
     LogLine "  POST " & h.Status & " " & h.StatusText & " (" & Len(h.ResponseText) & " bytes)"
     If h.Status = 200 Then HttpPost = h.ResponseText Else HttpPost = ""
     Exit Function
 Fail: LogLine "  POST ERROR: " & Err.Number & " " & Err.Description : HttpPost = ""
+End Function
+
+
+' --- Auto-discover the current distribution UUID from the CMS DKAN metastore --
+' Called once per year before batching so UUID rotations are handled silently.
+' Returns "" on any error (caller falls back to hardcoded or GET).
+Private Function FetchDistUUID(dsID As String) As String
+    On Error GoTo Fail
+    Dim url As String
+    url = "https://data.medicaid.gov/api/1/metastore/schemas/dataset/items/" & _
+          dsID & "?show-reference-ids=true"
+    Dim resp As String : resp = HttpGet(url)
+    If resp = "" Then FetchDistUUID = "" : Exit Function
+    ' Response contains: "distribution":[{"identifier":"UUID","data":{...}}]
+    ' Extract the first distribution identifier value.
+    Dim tag As String : tag = """distribution"":[{""identifier"":"""
+    Dim p   As Long   : p   = InStr(1, resp, tag, vbBinaryCompare)
+    If p = 0 Then FetchDistUUID = "" : Exit Function
+    Dim s As Long : s = p + Len(tag)
+    Dim e As Long : e = s
+    Do While e <= Len(resp)
+        If Mid(resp, e, 1) = """" Then Exit Do
+        e = e + 1
+    Loop
+    Dim uuid As String : uuid = Mid(resp, s, e - s)
+    ' Sanity check: valid UUIDs are 36 chars with hyphens
+    If Len(uuid) = 36 And InStr(uuid, "-") > 0 Then
+        FetchDistUUID = uuid
+    Else
+        FetchDistUUID = ""
+    End If
+    Exit Function
+Fail:
+    FetchDistUUID = ""
 End Function
 
 ' --- HTTP GET via WinHttp -----------------------------------------------------
@@ -1355,16 +1439,16 @@ try {
 Write-Host ''
 Write-Host '  =====================================================' -ForegroundColor Green
 Write-Host '   Pharmacy Tools Add-In installed successfully!'        -ForegroundColor Green
-Write-Host '   Version 2.3'                                          -ForegroundColor Green
+Write-Host '   Version 2.3.3'                                        -ForegroundColor Green
 Write-Host '  =====================================================' -ForegroundColor Green
 Write-Host ''
-Write-Host '  What is new in v2.3:' -ForegroundColor White
-Write-Host '    - Dataset Manager is now a full form showing all'
-Write-Host '      built-in and custom years in a grid'
-Write-Host '    - Built-in entries can be overridden (Edit button)'
-Write-Host '    - Custom entries can be added, edited, or deleted'
-Write-Host '    - Re-running Lookup now clears previous red rows'
-Write-Host '      before re-applying highlights to current failures'
+Write-Host '  What is new in v2.3.3:' -ForegroundColor White
+Write-Host '    - Distribution UUID auto-discovered from CMS metastore'
+Write-Host '      at runtime -- UUID rotations are handled silently'
+Write-Host '    - POST 400 auto-retry: stale UUID triggers a live'
+Write-Host '      UUID refresh and one retry before GET fallback'
+Write-Host '    - 2026 dataset and distribution UUIDs added'
+Write-Host '    - Fix: m_LastHttpStatus declared at module level'
 Write-Host ''
 Write-Host '  Next steps:' -ForegroundColor White
 Write-Host '    1. Open Excel'
