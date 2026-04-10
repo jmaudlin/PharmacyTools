@@ -1,14 +1,37 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Installs the Pharmacy Tools Excel Add-In (NADAC Lookup) v2.3.3
+    Installs the Pharmacy Tools Excel Add-In (NADAC Lookup) v2.3.5
 
 .DESCRIPTION
     Builds an Excel .xlam add-in containing:
-      - modNADAC          : NADAC Lookup main module (v2.3.3)
-      - frmDatasetManager : Full Dataset Manager UserForm (v2.3.3)
+      - modNADAC          : NADAC Lookup main module (v2.3.5)
+      - frmDatasetManager : Full Dataset Manager UserForm (v2.3.5)
     Then injects a custom ribbon tab and pharmacy-bottle icon.
     Registers the add-in so it loads automatically in Excel.
+
+    v2.3.5 (2026-04-09):
+      - Fix: POST now uses dataset-ID/index endpoint
+        (POST /api/1/datastore/query/{datasetID}/0) instead of the
+        distribution UUID endpoint. Distribution UUIDs rotate on every
+        weekly dataset refresh, causing stale-UUID 400 errors that silently
+        fell back to cached/old data. The indexed endpoint is stable and
+        requires no UUID resolution at all.
+      - Fix: distribution UUID resolution is now deferred to a fallback path
+        only triggered on 400, eliminating the pre-batch metastore round-trip.
+      - Fix: FetchDistUUID JSON parser now handles both the show-reference-ids
+        expanded-object format and the plain %Ref: reference format, and is
+        tolerant of whitespace in the response.
+      - Fix: NADAC Calculations now inserts the three output columns
+        immediately after NADAC Effective Date (before Retail) rather than
+        appending them at the end of the sheet. Source columns that shift
+        right due to the insertion are automatically adjusted.
+
+    v2.3.4 (2026-04-09):
+      - New tool: NADAC Calculations — adds NADAC Based Cost,
+        NADAC Calculated Margin, and Actual Cost columns after a
+        NADAC Lookup run. Available as a ribbon button in the
+        Pharmacy Tools > NADAC group.
 
     v2.3.3 (2026-04-09):
       - Fix: m_LastHttpStatus moved to module-level declarations
@@ -42,7 +65,7 @@ $ErrorActionPreference = 'Stop'
 
 Write-Host ''
 Write-Host '  =====================================================' -ForegroundColor Cyan
-Write-Host '   Pharmacy Tools Add-In  --  Installer  v2.3.3'        -ForegroundColor Cyan
+Write-Host '   Pharmacy Tools Add-In  --  Installer  v2.3.5'        -ForegroundColor Cyan
 Write-Host '  =====================================================' -ForegroundColor Cyan
 Write-Host ''
 
@@ -98,11 +121,13 @@ if (-not (Test-Path $AddinDir)) { New-Item -ItemType Directory -Path $AddinDir -
 # -----------------------------------------------------------------------------
 $IconB64 = 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAABV0lEQVR4nM1XMQ7CMAxMKv6RkQ906wMYkPITlg5IHZgYKjGw8JNKDDygWz/QsS8pA2oVJXZquylwEyTO+eI4rqMVA8ZWI8VuaGpN5SQZUh1LhEQNpI45QtCJmHOMULKGTMQ5Vw5HtoVzbA3ErWMGEscQYrwZxWgtfC7X105CKEk2DKCyGImx1Xi/nVDC8vwg35KhqXXmD6QMvQ+Im30EQ1PrUilRjUgiYMI+L4Kxvmuja6DcCerAEpbKMzbv7376z4qAsdW4zwvVdy26209k4HBDYkRHAIWfCl9YIABLFgivy3H+fbg+2c6V8nIg1eeXgzkCHOfuzv0xSiRcZJDzb0YiuIZbVkII4C1YEjGFmZuEEEgNSSoYW40+v3Yn3Qmso6HUgL5roz2Ay88uxakxC1hSvAax6JIaR3cBRdhkT2lwf96W/+fDhELIgehplkLI6sepVAgnX95X9Nb4jUrLGgAAAABJRU5ErkJggg=='
 
+$Icon2B64 = 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAABtklEQVR4nO1XLWzCQBT+uqCakIWEBIGsmZw702XBFFHDBLglKAR6FoWdnpgimQMxTAUYQsDUITF1m1hG0pAmtSC2V9rrtYxxZRN8yaU/73vvfXf33iUH/DEU/odmsk2WCR3LjuQMPjSTba5ur49O4L59pto/nPeIkBwZKPlyugjIvu9BVfNHiwqjpJVJhA5gngN2y76cLvDaewEAVBu1QMSoP5Qm4K55j5JWBkw2cyxbyYlI1UYNo/4w9twHEs0jxVcXCjggwK94YVwkBaLZJM1KFoIV4Kv3RFuA1Bo4FJltgcwu4KEAX21Y0soAdgcFkN05QHkcy76JbQERToWYAG/lCon5YkE6JybAW7l47HSFjg/dDvLFgjQOQViEANBst9Bst5LM0jiJJ2Hv6Tk1sCxOrAtOVQOJXcAXyb5Ex3CAcxecu+DcBf+gCyJF6K1cMEOHv/bBDD0yKCDPCXNFHBo8J3EFCJPBGABQqRtCe6VuYDIYJ9rTfGMCHMtWYLKNeqn+2JmSp4mgSfDxqAAB7moGAGERYciqAX/tAwAJmPOXU10z2UzoKQk082/EBARCshQBYE4vWyOKN1nNdj3pAAAAAElFTkSuQmCC'
+
 $VbaCode = @'
 Option Explicit
 
 ' --- Version ------------------------------------------------------------------
-Public  Const ADDIN_VERSION    As String = "2.3.3"
+Public  Const ADDIN_VERSION    As String = "2.3.5"
 Private Const ADDIN_BUILD_DATE As String = "2026-04-09"
 
 ' Module-level: tracks last HTTP status so callers can detect 400 vs network error
@@ -184,6 +209,10 @@ End Sub
 
 Public Sub RunAbout(control As IRibbonControl)
     ShowAbout
+End Sub
+
+Public Sub RunNADACCalcs(control As IRibbonControl)
+    AddNADACCalculations
 End Sub
 
 ' --- Main lookup --------------------------------------------------------------
@@ -349,31 +378,21 @@ Public Sub RunLookup()
             End If
         End If
 
-        ' Resolve Distribution UUID -------------------------------------------------
-        ' Always query the CMS metastore for the live distribution UUID so that
-        ' dataset refreshes (which rotate the UUID) are handled automatically.
-        ' The hardcoded KnownDistUUIDs table is a session-start fast-path only.
-        Dim distUUID As String : distUUID = ""
-        If knownDist.Exists(dsID) Then distUUID = CStr(knownDist(dsID))
-        Application.StatusBar = "NADAC Lookup  |  Verifying " & yr & " dataset UUID..."
-        DoEvents
-        Dim freshUUID As String : freshUUID = FetchDistUUID(dsID)
-        If freshUUID <> "" Then
-            If freshUUID <> distUUID And distUUID <> "" Then
-                LogLine "  UUID rotated for " & yr & ": " & distUUID & " -> " & freshUUID
-            ElseIf distUUID = "" Then
-                LogLine "  UUID discovered for " & yr & ": " & freshUUID
-            End If
-            distUUID = freshUUID
-            knownDist(dsID) = freshUUID   ' update session cache
-        End If
+        ' -----------------------------------------------------------------------
+        ' POST uses the stable dataset-ID/index endpoint:
+        '   POST /api/1/datastore/query/{datasetID}/0
+        ' This never needs a distribution UUID, which rotates on every weekly
+        ' dataset refresh and was the root cause of stale effective dates.
+        ' Distribution UUID resolution is kept as a 400 fallback only.
+        ' -----------------------------------------------------------------------
+        Dim postUrl  As String : postUrl  = API_BASE & dsID & "/0"
+        Dim distUUID As String : distUUID = ""   ' resolved lazily on first 400
 
         ' Batch-query this year's NDCs
         Dim allNDCs() As Variant : allNDCs = yearNDCs(yr).Keys
         cnt = yearNDCs(yr).Count
         Dim maxDt As Date : maxDt = CDate(yearMaxDt(yr))
-        LogLine "  Year=" & yr & "  dsID=" & dsID & "  distUUID=" & _
-                IIf(distUUID <> "", distUUID, "(none)") & _
+        LogLine "  Year=" & yr & "  dsID=" & dsID & _
                 "  NDCs=" & cnt & "  maxDt=" & Format(maxDt, "yyyy-mm-dd")
 
         Dim bi As Long
@@ -396,33 +415,42 @@ Public Sub RunLookup()
             DoEvents
 
             Dim resp As String : resp = ""
-            If distUUID <> "" Then
-                Dim body As String : body = BuildPostBody(bNDCs, maxDt)
-                LogLine "  POST batch " & (bi + 1) & "  NDCs=" & Join(bNDCs, ",")
-                resp = HttpPost(API_BASE & distUUID, body)
-                ' Auto-retry once on 400: re-query metastore for a fresh UUID
-                If resp = "" And m_LastHttpStatus = 400 Then
-                    LogLine "  POST 400 -- re-fetching UUID for " & yr
-                    Application.StatusBar = "NADAC Lookup  |  " & yr & " UUID refresh..."
-                    DoEvents
-                    Dim retryUUID As String : retryUUID = FetchDistUUID(dsID)
-                    If retryUUID <> "" And retryUUID <> distUUID Then
-                        LogLine "  Retrying with UUID: " & retryUUID
-                        distUUID = retryUUID
-                        knownDist(dsID) = retryUUID
-                        PauseMs RATE_MS
-                        resp = HttpPost(API_BASE & distUUID, body)
+            Dim body As String : body = BuildPostBody(bNDCs, maxDt)
+            LogLine "  POST batch " & (bi + 1) & "  NDCs=" & Join(bNDCs, ",")
+            resp = HttpPost(postUrl, body)
+
+            ' On 400: resolve distribution UUID and retry once.
+            ' This handles the rare case where the dsID/0 endpoint itself
+            ' returns 400 (e.g., older datasets not indexed by position).
+            If resp = "" And m_LastHttpStatus = 400 Then
+                LogLine "  dsID/0 POST 400 -- resolving distribution UUID for " & yr
+                Application.StatusBar = "NADAC Lookup  |  " & yr & " UUID fallback..."
+                DoEvents
+                If distUUID = "" Then
+                    If knownDist.Exists(dsID) Then distUUID = CStr(knownDist(dsID))
+                    Dim freshUUID As String : freshUUID = FetchDistUUID(dsID)
+                    If freshUUID <> "" Then
+                        distUUID = freshUUID
+                        knownDist(dsID) = freshUUID
+                        LogLine "  Resolved distribution UUID: " & freshUUID
                     End If
                 End If
-                If resp <> "" Then
-                    Dim arrStr As String : arrStr = ExtractResultsArray(resp)
-                    If arrStr <> "" And arrStr <> "[]" Then
-                        ParseIntoCache arrStr, apiCache
-                        If RecordCount(arrStr) >= API_LIMIT Then truncWarn = True
-                    End If
+                If distUUID <> "" Then
+                    LogLine "  Retrying with distribution UUID: " & distUUID
+                    PauseMs RATE_MS
+                    resp = HttpPost(API_BASE & distUUID, body)
+                End If
+            End If
+
+            If resp <> "" Then
+                Dim arrStr As String : arrStr = ExtractResultsArray(resp)
+                If arrStr <> "" And arrStr <> "[]" Then
+                    ParseIntoCache arrStr, apiCache
+                    If RecordCount(arrStr) >= API_LIMIT Then truncWarn = True
                 End If
             Else
-                ' Fallback: GET per NDC for years without a distribution UUID
+                ' Both POST paths failed — fall back to GET per NDC
+                LogLine "  POST failed (status=" & m_LastHttpStatus & ") -- GET fallback"
                 Dim k As Long
                 For k = 0 To UBound(bNDCs)
                     LogLine "  GET fallback  ndc=" & bNDCs(k)
@@ -582,6 +610,196 @@ Public Sub ShowAbout()
     MsgBox s, vbInformation, "About Pharmacy Tools"
 End Sub
 
+' --- NADAC Calculations: add NADAC Based Cost, Margin, and Actual Cost --------
+' Run this after NADAC Lookup to add three derived calculation columns.
+' Columns are inserted immediately after NADAC Effective Date and before
+' the Retail column. Source columns that shift right are auto-adjusted.
+'
+'   NADAC Based Cost         = NADAC per unit x Quantity
+'   NADAC Calculated Margin  = (NADAC per unit x Quantity) - Retail
+'   Actual Cost              = NADAC Based Cost when lookup succeeded;
+'                              falls back to original Cost when lookup
+'                              returned a failure message (string > 10 chars)
+'
+Public Sub AddNADACCalculations()
+    On Error GoTo ErrHandler
+    LogLine "=== NADAC Calculations v" & ADDIN_VERSION & " started ==="
+
+    Dim wb As Workbook : Set wb = ActiveWorkbook
+    If wb Is Nothing Then
+        MsgBox "Please open a workbook first.", vbExclamation, "NADAC Calculations"
+        Exit Sub
+    End If
+
+    Dim ws As Worksheet : Set ws = wb.ActiveSheet
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    If lastRow < 2 Then
+        MsgBox "No data rows found on the active sheet.", vbExclamation, "NADAC Calculations"
+        Exit Sub
+    End If
+
+    ' -- Locate NADAC source column (must exist; run Lookup first) -------------
+    Dim nadacCol As Long
+    nadacCol = FindHeaderCol(ws, Array("NADAC"))
+    If nadacCol = 0 Then
+        MsgBox "NADAC column not found." & vbCrLf & _
+               "Please run NADAC Lookup first.", vbExclamation, "NADAC Calculations"
+        Exit Sub
+    End If
+
+    ' -- Locate NADAC Effective Date column ------------------------------------
+    Dim nadacEdCol As Long
+    nadacEdCol = FindHeaderCol(ws, Array("NADAC Effective Date"))
+    If nadacEdCol = 0 Then
+        MsgBox "NADAC Effective Date column not found." & vbCrLf & _
+               "Please run NADAC Lookup first.", vbExclamation, "NADAC Calculations"
+        Exit Sub
+    End If
+
+    ' -- Locate Quantity column ------------------------------------------------
+    Dim qtyCol As Long
+    qtyCol = FindHeaderCol(ws, Array("Quan.", "Quantity", "Qty", "QTY", "QUAN"))
+    If qtyCol = 0 Then
+        Dim qi As String
+        qi = InputBox("Quantity column not auto-detected." & vbCrLf & _
+                      "Enter the column letter  (e.g.  C):", "NADAC Calculations", "C")
+        If qi = "" Then Exit Sub
+        On Error Resume Next
+        qtyCol = ws.Range(UCase(Trim(qi)) & "1").Column
+        On Error GoTo ErrHandler
+        If qtyCol = 0 Then MsgBox "Invalid column.", vbCritical, "NADAC Calculations" : Exit Sub
+    End If
+
+    ' -- Locate Cost column ----------------------------------------------------
+    Dim costCol As Long
+    costCol = FindHeaderCol(ws, Array("Cost", "Dispense Cost", "Drug Cost", "Rx Cost"))
+    If costCol = 0 Then
+        Dim ci As String
+        ci = InputBox("Cost column not auto-detected." & vbCrLf & _
+                      "Enter the column letter  (e.g.  E):", "NADAC Calculations", "E")
+        If ci = "" Then Exit Sub
+        On Error Resume Next
+        costCol = ws.Range(UCase(Trim(ci)) & "1").Column
+        On Error GoTo ErrHandler
+        If costCol = 0 Then MsgBox "Invalid column.", vbCritical, "NADAC Calculations" : Exit Sub
+    End If
+
+    ' -- Locate Retail column --------------------------------------------------
+    Dim retailCol As Long
+    retailCol = FindHeaderCol(ws, Array("Retail", "Retail Price", "Retail Cost"))
+    If retailCol = 0 Then
+        Dim ri As String
+        ri = InputBox("Retail column not auto-detected." & vbCrLf & _
+                      "Enter the column letter  (e.g.  K):", "NADAC Calculations", "K")
+        If ri = "" Then Exit Sub
+        On Error Resume Next
+        retailCol = ws.Range(UCase(Trim(ri)) & "1").Column
+        On Error GoTo ErrHandler
+        If retailCol = 0 Then MsgBox "Invalid column.", vbCritical, "NADAC Calculations" : Exit Sub
+    End If
+
+    ' -- Confirm ---------------------------------------------------------------
+    If MsgBox("NADAC Calculations  --  Ready to run." & vbCrLf & vbCrLf & _
+              "  NADAC column       :  " & ColLtr(nadacCol)  & "  (""" & ws.Cells(1, nadacCol).Value  & """)" & vbCrLf & _
+              "  NADAC Eff. Date    :  " & ColLtr(nadacEdCol) & vbCrLf & _
+              "  Quantity           :  " & ColLtr(qtyCol)    & "  (""" & ws.Cells(1, qtyCol).Value    & """)" & vbCrLf & _
+              "  Cost               :  " & ColLtr(costCol)   & "  (""" & ws.Cells(1, costCol).Value   & """)" & vbCrLf & _
+              "  Retail             :  " & ColLtr(retailCol) & "  (""" & ws.Cells(1, retailCol).Value & """)" & vbCrLf & _
+              "  Data rows          :  " & (lastRow - 1) & vbCrLf & vbCrLf & _
+              "Three columns will be inserted after """ & ws.Cells(1, nadacEdCol).Value & """:" & vbCrLf & _
+              "   NADAC Based Cost  |  NADAC Calculated Margin  |  Actual Cost" & vbCrLf & vbCrLf & _
+              "Click OK to begin.", vbOKCancel + vbInformation, "NADAC Calculations") = vbCancel Then
+        Exit Sub
+    End If
+
+    ' -- Determine output column positions ------------------------------------
+    ' If the output columns already exist (re-run), use their current positions.
+    ' Otherwise, insert three new columns immediately after NADAC Effective Date.
+    Dim baseCostCol As Long : baseCostCol = FindHeaderCol(ws, Array("NADAC Based Cost"))
+    Dim marginCol   As Long : marginCol   = FindHeaderCol(ws, Array("NADAC Calculated Margin"))
+    Dim actCostCol  As Long : actCostCol  = FindHeaderCol(ws, Array("Actual Cost"))
+
+    Dim insertAt As Long : insertAt = nadacEdCol + 1  ' column AFTER NADAC Eff Date
+
+    If baseCostCol = 0 Or marginCol = 0 Or actCostCol = 0 Then
+        ' Insert three columns in reverse order so each insertion lands at insertAt
+        ws.Columns(insertAt).Insert Shift:=xlToRight  ' Actual Cost   → insertAt+2 after all
+        ws.Columns(insertAt).Insert Shift:=xlToRight  ' NADAC Calc Margin → insertAt+1
+        ws.Columns(insertAt).Insert Shift:=xlToRight  ' NADAC Based Cost  → insertAt
+
+        ' Assign output positions
+        baseCostCol = insertAt
+        marginCol   = insertAt + 1
+        actCostCol  = insertAt + 2
+
+        ' Write bold headers
+        With ws.Cells(1, baseCostCol)
+            .Value = "NADAC Based Cost"   : .Font.Bold = True
+        End With
+        With ws.Cells(1, marginCol)
+            .Value = "NADAC Calculated Margin"  : .Font.Bold = True
+        End With
+        With ws.Cells(1, actCostCol)
+            .Value = "Actual Cost"   : .Font.Bold = True
+        End With
+
+        ' Source columns to the RIGHT of the insertion point have shifted +3.
+        ' Re-locate them by header name so the formula references stay correct.
+        If nadacCol  >= insertAt Then nadacCol  = FindHeaderCol(ws, Array("NADAC"))
+        If qtyCol    >= insertAt Then qtyCol    = FindHeaderCol(ws, Array("Quan.", "Quantity", "Qty", "QTY", "QUAN"))
+        If costCol   >= insertAt Then costCol   = FindHeaderCol(ws, Array("Cost", "Dispense Cost", "Drug Cost", "Rx Cost"))
+        If retailCol >= insertAt Then retailCol = FindHeaderCol(ws, Array("Retail", "Retail Price", "Retail Cost"))
+    End If
+
+    ' -- Build column letter strings once (constant across all rows) -----------
+    Dim nC As String : nC = ColLtr(nadacCol)
+    Dim qC As String : qC = ColLtr(qtyCol)
+    Dim eC As String : eC = ColLtr(costCol)
+    Dim kC As String : kC = ColLtr(retailCol)
+    Dim hC As String : hC = ColLtr(baseCostCol)
+
+    Application.ScreenUpdating = False
+    Application.Calculation    = xlCalculationManual
+
+    Dim r As Long
+    For r = 2 To lastRow
+        Dim rS As String : rS = CStr(r)
+
+        ' NADAC Based Cost = NADAC per unit x Quantity
+        ws.Cells(r, baseCostCol).Value        = "=" & nC & rS & "*" & qC & rS
+        ws.Cells(r, baseCostCol).NumberFormat = "$#,##0.0000"
+
+        ' NADAC Calculated Margin = (NADAC x Qty) - Retail
+        ws.Cells(r, marginCol).Value        = "=(" & nC & rS & "*" & qC & rS & ")-" & kC & rS
+        ws.Cells(r, marginCol).NumberFormat = "$#,##0.00"
+
+        ' Actual Cost: fall back to original Cost when NADAC lookup returned a
+        ' failure message (text length > 10); otherwise use NADAC Based Cost.
+        ws.Cells(r, actCostCol).Value        = "=IF(IF(LEN(" & nC & rS & ")>10,-1,0)=-1," & eC & rS & "," & hC & rS & ")"
+        ws.Cells(r, actCostCol).NumberFormat = "$#,##0.00"
+    Next r
+
+    Application.ScreenUpdating = True
+    Application.Calculation    = xlCalculationAutomatic
+
+    LogLine "  NADAC Calculations complete: " & (lastRow - 1) & " rows"
+    MsgBox "NADAC Calculations complete." & vbCrLf & vbCrLf & _
+           "  Rows updated  :  " & (lastRow - 1) & vbCrLf & vbCrLf & _
+           "Columns added / updated:" & vbCrLf & _
+           "   " & ColLtr(baseCostCol) & "  NADAC Based Cost" & vbCrLf & _
+           "   " & ColLtr(marginCol)   & "  NADAC Calculated Margin" & vbCrLf & _
+           "   " & ColLtr(actCostCol)  & "  Actual Cost", _
+           vbInformation, "NADAC Calculations"
+    Exit Sub
+
+ErrHandler:
+    Application.ScreenUpdating = True
+    Application.Calculation    = xlCalculationAutomatic
+    LogLine "ERROR " & Err.Number & ": " & Err.Description
+    MsgBox "Error " & Err.Number & ": " & Err.Description, vbCritical, "NADAC Calculations"
+End Sub
+
 ' --- Discover dataset ID for a year not in the hardcoded table ----------------
 Private Function DiscoverDatasetID(yr As String) As String
     Dim title As String : title = "NADAC (National Average Drug Acquisition Cost) " & yr
@@ -685,9 +903,13 @@ Fail: LogLine "  POST ERROR: " & Err.Number & " " & Err.Description : HttpPost =
 End Function
 
 
-' --- Auto-discover the current distribution UUID from the CMS DKAN metastore --
-' Called once per year before batching so UUID rotations are handled silently.
-' Returns "" on any error (caller falls back to hardcoded or GET).
+' --- Auto-discover distribution UUID from the CMS DKAN metastore ------------
+' Used only as a fallback when the primary dsID/0 POST endpoint returns 400.
+' Handles both response formats produced by show-reference-ids=true:
+'   Expanded : "distribution":[{"identifier":"<uuid>", ...}]
+'   Reference: "distribution":["%Ref:distribution/<uuid>"]
+' Whitespace-tolerant: the search starts from the "distribution" key position
+' so spacing between tokens doesn't affect matching.
 Private Function FetchDistUUID(dsID As String) As String
     On Error GoTo Fail
     Dim url As String
@@ -695,26 +917,71 @@ Private Function FetchDistUUID(dsID As String) As String
           dsID & "?show-reference-ids=true"
     Dim resp As String : resp = HttpGet(url)
     If resp = "" Then FetchDistUUID = "" : Exit Function
-    ' Response contains: "distribution":[{"identifier":"UUID","data":{...}}]
-    ' Extract the first distribution identifier value.
-    Dim tag As String : tag = """distribution"":[{""identifier"":"""
-    Dim p   As Long   : p   = InStr(1, resp, tag, vbBinaryCompare)
-    If p = 0 Then FetchDistUUID = "" : Exit Function
-    Dim s As Long : s = p + Len(tag)
-    Dim e As Long : e = s
-    Do While e <= Len(resp)
-        If Mid(resp, e, 1) = """" Then Exit Do
-        e = e + 1
-    Loop
-    Dim uuid As String : uuid = Mid(resp, s, e - s)
-    ' Sanity check: valid UUIDs are 36 chars with hyphens
-    If Len(uuid) = 36 And InStr(uuid, "-") > 0 Then
-        FetchDistUUID = uuid
-    Else
-        FetchDistUUID = ""
+
+    ' --- Locate the "distribution" key ----------------------------------------
+    Dim distKeyPos As Long
+    distKeyPos = InStr(1, resp, """distribution""", vbBinaryCompare)
+    If distKeyPos = 0 Then FetchDistUUID = "" : Exit Function
+
+    ' Advance past the opening "[" of the array
+    Dim arrStart As Long : arrStart = InStr(distKeyPos, resp, "[", vbBinaryCompare)
+    If arrStart = 0 Then FetchDistUUID = "" : Exit Function
+
+    ' --- Approach 1: expanded object  {"identifier":"<uuid>"}  ----------------
+    Dim idKey As String : idKey = """identifier"""
+    Dim idPos As Long   : idPos = InStr(arrStart, resp, idKey, vbBinaryCompare)
+    If idPos > 0 Then
+        ' Skip past the key, then past whitespace/colon to the opening quote
+        Dim p As Long : p = idPos + Len(idKey)
+        Do While p <= Len(resp)
+            Dim c As String : c = Mid(resp, p, 1)
+            If c = """" Then p = p + 1 : Exit Do   ' found opening quote of value
+            p = p + 1
+        Loop
+        Dim s1 As Long : s1 = p
+        Dim e1 As Long : e1 = p
+        Do While e1 <= Len(resp)
+            If Mid(resp, e1, 1) = """" Then Exit Do
+            e1 = e1 + 1
+        Loop
+        Dim uuid1 As String : uuid1 = Mid(resp, s1, e1 - s1)
+        If Len(uuid1) = 36 And InStr(uuid1, "-") > 0 Then
+            FetchDistUUID = uuid1 : Exit Function
+        End If
     End If
+
+    ' --- Approach 2: plain reference  "%Ref:distribution/<uuid>"  -------------
+    Dim refTag As String : refTag = """%Ref:"
+    Dim refPos As Long   : refPos = InStr(arrStart, resp, refTag, vbBinaryCompare)
+    If refPos > 0 Then
+        ' Find the last "/" before the closing quote — UUID follows it
+        Dim qs As Long : qs = refPos + Len(refTag)
+        Dim lastSlash As Long : lastSlash = 0
+        Dim i As Long
+        For i = qs To qs + 120
+            If i > Len(resp) Then Exit For
+            Dim ch As String : ch = Mid(resp, i, 1)
+            If ch = "/" Then lastSlash = i
+            If ch = """" Then Exit For
+        Next i
+        If lastSlash > 0 Then
+            Dim s2 As Long : s2 = lastSlash + 1
+            Dim e2 As Long : e2 = s2
+            Do While e2 <= Len(resp)
+                If Mid(resp, e2, 1) = """" Then Exit Do
+                e2 = e2 + 1
+            Loop
+            Dim uuid2 As String : uuid2 = Mid(resp, s2, e2 - s2)
+            If Len(uuid2) = 36 And InStr(uuid2, "-") > 0 Then
+                FetchDistUUID = uuid2 : Exit Function
+            End If
+        End If
+    End If
+
+    FetchDistUUID = ""
     Exit Function
 Fail:
+    LogLine "  FetchDistUUID error: " & Err.Number & " " & Err.Description
     FetchDistUUID = ""
 End Function
 
@@ -1214,6 +1481,13 @@ $RibbonXml = @'
                   onAction="RunNADACLookup"
                   screentip="NADAC Lookup"
                   supertip="Query the CMS Medicaid NADAC API and populate NADAC and NADAC Effective Date for each row." />
+          <button id="btnNADACCalcs"
+                  label="NADAC Calculations"
+                  image="rIdImg2"
+                  size="normal"
+                  onAction="RunNADACCalcs"
+                  screentip="NADAC Calculations"
+                  supertip="Add NADAC Based Cost, NADAC Calculated Margin, and Actual Cost columns. Run after NADAC Lookup." />
         </group>
         <group id="grpTools" label="Tools">
           <button id="btnManageDatasets"
@@ -1311,9 +1585,17 @@ $imgStream = $imgEntry.Open()
 $imgStream.Write($imgBytes, 0, $imgBytes.Length)
 $imgStream.Close()
 
+# -- customUI/images/image2.png  (calculator / NADAC Calculations icon) ------
+Remove-ZipEntry $Zip 'customUI/images/image2.png'
+$img2Bytes = [Convert]::FromBase64String($Icon2B64)
+$img2Entry = $Zip.CreateEntry('customUI/images/image2.png')
+$img2Stream = $img2Entry.Open()
+$img2Stream.Write($img2Bytes, 0, $img2Bytes.Length)
+$img2Stream.Close()
+
 # -- customUI/_rels/customUI14.xml.rels  (image relationship) -----------------
 Remove-ZipEntry $Zip 'customUI/_rels/customUI14.xml.rels'
-$cuRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImg1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="images/image1.png"/></Relationships>'
+$cuRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImg1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="images/image1.png"/><Relationship Id="rIdImg2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="images/image2.png"/></Relationships>'
 $cuRelsE = $Zip.CreateEntry('customUI/_rels/customUI14.xml.rels')
 $swCR = [System.IO.StreamWriter]::new($cuRelsE.Open(), [System.Text.Encoding]::UTF8)
 $swCR.Write($cuRels)
@@ -1439,16 +1721,18 @@ try {
 Write-Host ''
 Write-Host '  =====================================================' -ForegroundColor Green
 Write-Host '   Pharmacy Tools Add-In installed successfully!'        -ForegroundColor Green
-Write-Host '   Version 2.3.3'                                        -ForegroundColor Green
+Write-Host '   Version 2.3.5'                                        -ForegroundColor Green
 Write-Host '  =====================================================' -ForegroundColor Green
 Write-Host ''
-Write-Host '  What is new in v2.3.3:' -ForegroundColor White
-Write-Host '    - Distribution UUID auto-discovered from CMS metastore'
-Write-Host '      at runtime -- UUID rotations are handled silently'
-Write-Host '    - POST 400 auto-retry: stale UUID triggers a live'
-Write-Host '      UUID refresh and one retry before GET fallback'
-Write-Host '    - 2026 dataset and distribution UUIDs added'
-Write-Host '    - Fix: m_LastHttpStatus declared at module level'
+Write-Host '  What is new in v2.3.5:' -ForegroundColor White
+Write-Host '    - Fix: NADAC Lookup now uses the stable dataset-ID/index'
+Write-Host '      POST endpoint instead of the rotating distribution UUID.'
+Write-Host '      This resolves stale effective dates caused by the 2026'
+Write-Host '      dataset UUID rotating on every weekly CMS refresh.'
+Write-Host '    - Fix: NADAC Calculations now inserts columns immediately'
+Write-Host '      after NADAC Effective Date (before Retail).'
+Write-Host '    - Fix: FetchDistUUID parser now handles both JSON formats'
+Write-Host '      and is whitespace-tolerant (kept as 400 fallback only).'
 Write-Host ''
 Write-Host '  Next steps:' -ForegroundColor White
 Write-Host '    1. Open Excel'
