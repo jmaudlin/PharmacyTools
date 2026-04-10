@@ -208,6 +208,8 @@ footer{margin:28px 48px 20px;padding-top:14px;border-top:1px solid var(--border)
 #saveBtn:disabled{opacity:0.5;pointer-events:none}
 #printBtn{padding:6px 12px;background:rgba(13,115,119,0.2);border:1px solid rgba(13,115,119,0.4);border-radius:7px;color:var(--teal2);font-size:0.76rem;cursor:pointer;font-family:'DM Sans',sans-serif;transition:all 0.2s;white-space:nowrap}
 #printBtn:hover{background:rgba(13,115,119,0.35);color:#fff}
+#refBtn{padding:6px 12px;background:rgba(100,130,200,0.15);border:1px solid rgba(100,130,200,0.35);border-radius:7px;color:#8ab4d8;font-size:0.76rem;cursor:pointer;font-family:'DM Sans',sans-serif;transition:all 0.2s;white-space:nowrap;text-decoration:none;display:inline-flex;align-items:center}
+#refBtn:hover{background:rgba(100,130,200,0.28);color:#fff}
 
 /* ── PRINT / PDF ── */
 @media print {
@@ -600,6 +602,7 @@ footer{margin:28px 48px 20px;padding-top:14px;border-top:1px solid var(--border)
       <div class="header-badge">⚠️ Recovery: <strong id="hdrRecovery">—</strong> — action required</div>
       <button id="saveBtn" onclick="saveReconciliation()">💾 Save</button>
       <button id="printBtn" onclick="printDashboard()">🖨 Print PDF</button>
+      <a id="refBtn" href="https://github.com/jmaudlin/PharmacyTools/raw/main/MahaskaDrug_Dashboard_Reference.docx" download="MahaskaDrug_Dashboard_Reference.docx">📄 Reference</a>
       <button id="resetBtn" onclick="resetToUpload()">↩ New Files</button>
     </div>
   </div>
@@ -773,6 +776,59 @@ footer{margin:28px 48px 20px;padding-top:14px;border-top:1px solid var(--border)
       <div class="cch">Average Days from Fill to Payment</div>
       <div style="position:relative;height:260px"><canvas id="lagChart"></canvas></div>
     </div>
+  </div>
+
+  <!-- ═══ EXTENDED ANALYTICS ═══ -->
+  <div style="font-family:'DM Serif Display',serif;font-size:1.05rem;color:var(--text);margin:28px 0 14px;display:flex;align-items:center;gap:8px">
+    Extended Analytics
+    <span style="flex:1;height:1px;background:var(--border);margin-left:8px"></span>
+  </div>
+
+  <!-- Copay Rate + Claim Age -->
+  <div class="two-col">
+    <div class="cc" id="copayRateCard">
+      <div class="cct">Copay Collection Rate</div>
+      <div class="cch">Insurance Fills With vs. Without Patient Copay</div>
+      <div style="position:relative;height:190px"><canvas id="copayDonut"></canvas></div>
+      <div class="infobox" id="copayRateNote" style="margin-top:12px;font-size:0.78rem"></div>
+    </div>
+    <div class="cc" id="claimAgeCard">
+      <div class="cct">Claim Age Analysis</div>
+      <div class="cch">Unpaid Claims Bucketed by Days Since Fill</div>
+      <div style="position:relative;height:190px"><canvas id="ageBar"></canvas></div>
+      <div class="infobox infobox-red" id="ageNote" style="margin-top:12px;font-size:0.78rem"></div>
+    </div>
+  </div>
+
+  <!-- Network Participation + Monthly Trend -->
+  <div class="two-col">
+    <div class="cc" id="networkCard">
+      <div class="cct">Network Participation</div>
+      <div class="cch">Claim Volume & Revenue by Processor Tier</div>
+      <div style="position:relative;height:190px"><canvas id="networkBar"></canvas></div>
+    </div>
+    <div class="cc" id="trendCard">
+      <div class="cct">Period-Over-Period Trend</div>
+      <div class="cch">Recovery Rate, Gap & PBM Toll Over Time</div>
+      <div style="position:relative;height:190px"><canvas id="trendLine"></canvas></div>
+      <div class="infobox" id="trendNote" style="margin-top:12px;font-size:0.78rem"></div>
+    </div>
+  </div>
+
+  <!-- Quantity / Days Supply full width -->
+  <div class="cc" style="margin-bottom:18px">
+    <div class="cct">Dispensed Quantity vs. Payment Rate</div>
+    <div class="cch">Payment Success Rate by Fill Quantity — Days Supply Proxy</div>
+    <div style="position:relative;height:200px"><canvas id="qtyBar"></canvas></div>
+    <div class="infobox" id="qtyNote" style="margin-top:12px;font-size:0.78rem"></div>
+  </div>
+
+  <!-- Denial Reasons full width (conditional) -->
+  <div class="cc" style="margin-bottom:18px" id="denialCard">
+    <div class="cct">Denial Reason Codes</div>
+    <div class="cch">Top Denial Reasons from Remittance Data</div>
+    <div id="denialChartWrap" style="position:relative;height:240px;display:none"><canvas id="denialBar"></canvas></div>
+    <div id="denialContent"></div>
   </div>
 
 </main>
@@ -1157,12 +1213,205 @@ async function renderDashboard(merged,insRx,precomputedPBM=null){
   log('render: PBM analysis…','dim');
   const pbmData=precomputedPBM||buildPBMAnalysis(merged,allRows);
   renderPBMSection(merged,allRows,pbmData);
+  await renderExtendedAnalytics(merged,insRx,allRows,pbmData);
 
   // Wire all click handlers after DOM is built
   log('render: wiring click handlers…','dim');
   wireClickHandlers(merged,insRx,allRows,sMap,so,procs,topGap,lossLeaders,marginStars,profA,lossA);
 
 
+}
+
+// ── Extended Analytics ────────────────────────────────────────────────────────
+async function renderExtendedAnalytics(merged, insRx, allRows, pbmData){
+  log('render: extended analytics…','dim');
+
+  // 1. Copay Collection Rate
+  const withCopay=insRx.filter(r=>N(r['Copay / Patient Pay'])>0);
+  const noCopay=insRx.filter(r=>!(N(r['Copay / Patient Pay'])>0));
+  const copayAmt=withCopay.reduce((a,r)=>a+N(r['Copay / Patient Pay']),0);
+  if(charts.copayDonut) charts.copayDonut.destroy();
+  charts.copayDonut=new Chart(document.getElementById('copayDonut').getContext('2d'),{
+    type:'doughnut',
+    data:{labels:['Copay Collected','No Copay (Waived / Zero)'],datasets:[{
+      data:[withCopay.length,noCopay.length],
+      backgroundColor:['#27AE60','rgba(122,149,176,0.3)'],
+      borderColor:'#1a2a3e',borderWidth:3,hoverOffset:8}]},
+    options:{cutout:'65%',responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{position:'right',labels:{color:'#7a95b0',font:{family:'DM Sans',size:10},padding:8,boxWidth:10}},
+        tooltip:{callbacks:{label:ctx=>`${ctx.label}: ${NF(ctx.raw)} Rx`}}}}
+  });
+  document.getElementById('copayRateNote').innerHTML=
+    `<strong>${(withCopay.length/(insRx.length||1)*100).toFixed(1)}%</strong> of insurance Rx include a patient copay, totaling <strong>${$m(copayAmt)}</strong>. The remaining <strong>${NF(noCopay.length)}</strong> Rx had $0 copay — verify these are not improperly waived, as copay waivers can trigger compliance risk with certain payers.`;
+
+  // 2. Claim Age Buckets
+  const today=new Date();
+  const unpaidMerged=merged.filter(r=>r.gap>0);
+  const ageKeys=['0\u201330 days','31\u201360 days','61\u201390 days','91+ days'];
+  const ageBuckets={};ageKeys.forEach(k=>{ageBuckets[k]={rows:[],dollars:0};});
+  unpaidMerged.forEach(r=>{
+    if(!r.date) return;
+    const d=new Date(r.date);if(isNaN(d)) return;
+    const days=Math.floor((today-d)/864e5);
+    const k=days<=30?ageKeys[0]:days<=60?ageKeys[1]:days<=90?ageKeys[2]:ageKeys[3];
+    ageBuckets[k].rows.push(r);ageBuckets[k].dollars+=r.gap;
+  });
+  const ageCounts=ageKeys.map(k=>ageBuckets[k].rows.length);
+  const ageColors=['#27AE60','#f4a025','#e67e22','#C0392B'];
+  if(charts.ageBar) charts.ageBar.destroy();
+  charts.ageBar=new Chart(document.getElementById('ageBar').getContext('2d'),{
+    type:'bar',
+    data:{labels:ageKeys,datasets:[{data:ageCounts,backgroundColor:ageColors,borderRadius:5,borderSkipped:false}]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>`${NF(ctx.raw)} Rx \u00b7 ${$m(ageBuckets[ageKeys[ctx.dataIndex]].dollars)}`}}},
+      scales:{x:{ticks:{color:'#a0b4c8',font:{size:10}},grid:{display:false},border:{color:'transparent'}},
+        y:{ticks:{color:'#7a95b0',font:{size:10}},grid:{color:'rgba(255,255,255,0.05)'},border:{color:'transparent'}}}}
+  });
+  const over90=ageBuckets[ageKeys[3]];
+  document.getElementById('ageNote').innerHTML=
+    `<strong>${NF(over90.rows.length)}</strong> unpaid claims are over 90 days old, totaling <strong>${$m(over90.dollars)}</strong>. Claims past 90 days are typically beyond appeal windows — review for write-off vs. escalation.`;
+
+  // 3. Network Participation
+  function tierOf(proc){
+    const p=String(proc||'').trim();
+    if(VERT_INT_PBMS.includes(p)) return 'Vert. Integrated PBMs';
+    if(SWITCH_NETWORKS.includes(p)) return 'Switching Networks';
+    return 'Independent';
+  }
+  const tierVol={'Vert. Integrated PBMs':0,'Switching Networks':0,'Independent':0};
+  const tierRev={'Vert. Integrated PBMs':0,'Switching Networks':0,'Independent':0};
+  merged.forEach(r=>{const t=tierOf(r.processors);tierVol[t]++;tierRev[t]+=r.paid;});
+  const tierLabs=Object.keys(tierVol);
+  const totVol=merged.length||1;
+  const totRev=merged.reduce((a,r)=>a+r.paid,0)||1;
+  if(charts.networkBar) charts.networkBar.destroy();
+  charts.networkBar=new Chart(document.getElementById('networkBar').getContext('2d'),{
+    type:'bar',
+    data:{labels:tierLabs,datasets:[
+      {label:'Volume %',data:tierLabs.map(t=>+(tierVol[t]/totVol*100).toFixed(1)),backgroundColor:'rgba(13,115,119,0.75)',borderRadius:4,borderSkipped:false},
+      {label:'Revenue %',data:tierLabs.map(t=>+(tierRev[t]/totRev*100).toFixed(1)),backgroundColor:'rgba(244,160,37,0.75)',borderRadius:4,borderSkipped:false}
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{position:'top',labels:{color:'#7a95b0',font:{family:'DM Sans',size:10},padding:8,boxWidth:10}},
+        tooltip:{callbacks:{label:ctx=>`${ctx.dataset.label}: ${ctx.raw}%`}}},
+      scales:{x:{ticks:{color:'#a0b4c8',font:{size:9}},grid:{display:false},border:{color:'transparent'}},
+        y:{max:100,ticks:{color:'#7a95b0',font:{size:9},callback:v=>v+'%'},grid:{color:'rgba(255,255,255,0.05)'},border:{color:'transparent'}}}}
+  });
+
+  // 4. Period-Over-Period Trend
+  let trendPeriods=[];
+  try{
+    const idxRaw=localStorage.getItem('recon:index');
+    if(idxRaw){
+      const idxArr=JSON.parse(idxRaw);
+      for(const item of idxArr.slice(-12)){
+        try{
+          const raw=localStorage.getItem('recon:'+item.id);
+          if(!raw) continue;
+          const data=JSON.parse(raw);
+          const rows=(data.slimM||[]).map(a=>({insDue:Number(a[3])||0,paid:Number(a[5])||0,gap:Number(a[7])||0}));
+          const due=rows.reduce((s,r)=>s+r.insDue,0);
+          const pd=rows.reduce((s,r)=>s+r.paid,0);
+          const gp=rows.reduce((s,r)=>s+(r.gap>0?r.gap:0),0);
+          trendPeriods.push({label:item.label||item.id,recovery:due?pd/due*100:0,gap:gp,pbmToll:data.pbmToll||0});
+        }catch(_){}
+      }
+    }
+  }catch(_){}
+  const curDue=merged.reduce((a,r)=>a+r.insDue,0);
+  const curPaid=merged.reduce((a,r)=>a+r.paid,0);
+  const curGap=merged.filter(r=>r.gap>0).reduce((a,r)=>a+r.gap,0);
+  const curLabel=(document.getElementById('reportPeriod')?.textContent?.split('\u00b7')[1]?.trim())||'Current';
+  if(!trendPeriods.some(t=>t.label===curLabel))
+    trendPeriods.push({label:curLabel,recovery:curDue?curPaid/curDue*100:0,gap:curGap,pbmToll:pbmData?.pbmToll||0});
+  if(charts.trendLine) charts.trendLine.destroy();
+  const trendNote=document.getElementById('trendNote');
+  const trendCanvas=document.getElementById('trendLine');
+  if(trendPeriods.length<2){
+    trendCanvas.style.display='none';
+    trendNote.innerHTML='Save a reconciliation each period to build a trend. Once two or more periods are saved, this chart will show recovery rate, unpaid gap, and PBM toll month-over-month.';
+  } else {
+    trendCanvas.style.display='';trendNote.innerHTML='';
+    charts.trendLine=new Chart(trendCanvas.getContext('2d'),{
+      type:'line',
+      data:{labels:trendPeriods.map(t=>t.label),datasets:[
+        {label:'Recovery %',data:trendPeriods.map(t=>+t.recovery.toFixed(1)),borderColor:'#27AE60',backgroundColor:'rgba(39,174,96,0.1)',tension:0.3,yAxisID:'yP',pointRadius:5},
+        {label:'Unpaid Gap $',data:trendPeriods.map(t=>Math.round(t.gap)),borderColor:'#C0392B',backgroundColor:'rgba(192,57,43,0.1)',tension:0.3,yAxisID:'yD',pointRadius:5},
+        {label:'PBM Toll $',data:trendPeriods.map(t=>Math.round(t.pbmToll)),borderColor:'#f4a025',backgroundColor:'rgba(244,160,37,0.1)',tension:0.3,yAxisID:'yD',pointRadius:5}
+      ]},
+      options:{responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{position:'top',labels:{color:'#7a95b0',font:{family:'DM Sans',size:10},padding:8,boxWidth:10}},
+          tooltip:{callbacks:{label:ctx=>ctx.dataset.yAxisID==='yP'?` ${ctx.raw}%`:` ${$m(ctx.raw)}`}}},
+        scales:{
+          x:{ticks:{color:'#a0b4c8',font:{size:10}},grid:{display:false},border:{color:'transparent'}},
+          yP:{position:'left',ticks:{color:'#7a95b0',font:{size:9},callback:v=>v+'%'},grid:{color:'rgba(255,255,255,0.05)'},border:{color:'transparent'}},
+          yD:{position:'right',ticks:{color:'#7a95b0',font:{size:9},callback:v=>$f(v)},grid:{display:false},border:{color:'transparent'}}}}
+    });
+  }
+
+  // 5. Quantity / Days Supply Proxy
+  const qtyMap={};
+  allRows.forEach(r=>{qtyMap[String(r['Rx Number']||'').trim().replace(/\.0$/,'')]=N(r['Quan.']);});
+  const qBuckets={'1\u201330':{rows:[],paid:0},'31\u201360':{rows:[],paid:0},'61\u201390':{rows:[],paid:0},'91\u2013180':{rows:[],paid:0},'181+':{rows:[],paid:0}};
+  merged.forEach(r=>{
+    const qty=qtyMap[String(r.rxNum||'').trim().replace(/\.0$/,'')]||0;
+    const k=qty<=30?'1\u201330':qty<=60?'31\u201360':qty<=90?'61\u201390':qty<=180?'91\u2013180':'181+';
+    qBuckets[k].rows.push(r);
+    if(r.status==='Paid in Full'||r.paid>0) qBuckets[k].paid++;
+  });
+  const qLabs=Object.keys(qBuckets).filter(k=>qBuckets[k].rows.length>0);
+  const qRates=qLabs.map(k=>qBuckets[k].rows.length?+(qBuckets[k].paid/qBuckets[k].rows.length*100).toFixed(1):0);
+  const qCounts=qLabs.map(k=>qBuckets[k].rows.length);
+  if(charts.qtyBar) charts.qtyBar.destroy();
+  charts.qtyBar=new Chart(document.getElementById('qtyBar').getContext('2d'),{
+    type:'bar',
+    data:{labels:qLabs,datasets:[{label:'Pay Rate %',data:qRates,
+      backgroundColor:qRates.map(r=>r>=85?'rgba(39,174,96,0.75)':r>=70?'rgba(244,160,37,0.75)':'rgba(192,57,43,0.75)'),
+      borderRadius:5,borderSkipped:false}]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>`Pay Rate: ${ctx.raw}% (${NF(qCounts[ctx.dataIndex])} Rx)`}}},
+      scales:{
+        x:{ticks:{color:'#a0b4c8',font:{size:10}},grid:{display:false},border:{color:'transparent'},
+          title:{display:true,text:'Quantity Dispensed (Units)',color:'#7a95b0',font:{size:10}}},
+        y:{max:100,ticks:{color:'#7a95b0',font:{size:10},callback:v=>v+'%'},grid:{color:'rgba(255,255,255,0.05)'},border:{color:'transparent'}}}}
+  });
+  document.getElementById('qtyNote').innerHTML=`Quantity dispensed is a proxy for days supply. Patterns in pay rate across quantity tiers may indicate PBM restrictions on extended fills or high-quantity compounds. Variations by drug type are expected.`;
+
+  // 6. Denial Reason Codes
+  const reasonCols=['RejectCode','Reject Code','DenialReason','Denial Reason','RejectReason','Additional Message','Reject Description'];
+  const reasonCol=remitData&&remitData.length?reasonCols.find(c=>c in (remitData[0]||{})):null;
+  const denialContent=document.getElementById('denialContent');
+  const denialWrap=document.getElementById('denialChartWrap');
+  if(!reasonCol){
+    denialWrap.style.display='none';
+    denialContent.innerHTML=`<div class="infobox" style="margin-top:8px;font-size:0.78rem">Denial reason code column not detected in remittance data. Common column names searched: <em>${reasonCols.join(', ')}</em>. If your export includes denial codes, ensure the column matches one of these names.</div>`;
+  } else {
+    const rCounts={};
+    remitData.forEach(r=>{
+      const st=String(r['PayerStatus']||r['Status']||'').toLowerCase();
+      if(!st.includes('denied')&&!st.includes('reject')) return;
+      const code=String(r[reasonCol]||'Unknown').trim()||'Unknown';
+      rCounts[code]=(rCounts[code]||0)+1;
+    });
+    const topR=Object.entries(rCounts).sort((a,b)=>b[1]-a[1]).slice(0,10);
+    if(!topR.length){
+      denialWrap.style.display='none';
+      denialContent.innerHTML=`<div class="infobox" style="margin-top:8px;font-size:0.78rem">No denial reason codes found for this period.</div>`;
+    } else {
+      denialWrap.style.display='';denialContent.innerHTML='';
+      if(charts.denialBar) charts.denialBar.destroy();
+      charts.denialBar=new Chart(document.getElementById('denialBar').getContext('2d'),{
+        type:'bar',
+        data:{labels:topR.map(([k])=>k),datasets:[{data:topR.map(([,v])=>v),backgroundColor:'rgba(192,57,43,0.75)',borderRadius:5,borderSkipped:false}]},
+        options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+          plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>` ${NF(ctx.raw)} denials`}}},
+          scales:{
+            x:{ticks:{color:'#7a95b0',font:{size:10}},grid:{color:'rgba(255,255,255,0.05)'},border:{color:'transparent'}},
+            y:{ticks:{color:'#a0b4c8',font:{size:10}},grid:{display:false},border:{color:'transparent'}}}}
+      });
+    }
+  }
+  log('render: extended analytics \u2713','ok');
 }
 
 // ── Verbose log ───────────────────────────────────────────────────────────────
@@ -1198,6 +1447,8 @@ async function runAnalysis(){
 
     await tick(); sp(20,'Reading Remittance file…');
     log(`Remittance loaded — ${remitData.length.toLocaleString()} rows`, 'ok');
+    // Normalize inconsistent processor name spellings
+    remitData.forEach(r=>{ if(r['Processor']==='Optum Rx') r['Processor']='OptumRx'; });
     log(`Processors found: ${[...new Set(remitData.map(r=>r['Processor']).filter(Boolean))].length}`, 'dim');
 
     await tick(); sp(30,'Checking required columns…');
@@ -1302,10 +1553,10 @@ function resetToUpload(){
 }
 
 // ── PBM Classification ────────────────────────────────────────────────────────
-const BIG_PBMS  = ['CVS Caremark','OptumRx','Optum Rx','Prime Therapeutics'];
-const MID_PBMS  = ['McKesson*','Savrx','Change Healthcare'];
-const ALL_PBMS  = [...BIG_PBMS,...MID_PBMS];
-function pbmType(p){ return BIG_PBMS.includes(p)?'Big PBM':MID_PBMS.includes(p)?'Mid PBM':'Independent'; }
+const VERT_INT_PBMS  = ['CVS Caremark','OptumRx','Optum Rx','Prime Therapeutics'];
+const SWITCH_NETWORKS  = ['McKesson*','Savrx','Change Healthcare'];
+const ALL_PBMS  = [...VERT_INT_PBMS,...SWITCH_NETWORKS];
+function pbmType(p){ return VERT_INT_PBMS.includes(p)?'Vertically Integrated PBM':SWITCH_NETWORKS.includes(p)?'Switching Network':'Independent'; }
 function isPBM(p){ return ALL_PBMS.includes(p); }
 
 function buildPBMAnalysis(merged, allRows){
@@ -1368,8 +1619,8 @@ function buildPBMAnalysis(merged, allRows){
   }).sort((a,b)=>a.avg-b.avg);
 
   // Group stats (PBM type level)
-  const grpStats={'Big PBM':{total:0,paid:0,denied:0,reversed:0,amtPaid:0},
-                  'Mid PBM':{total:0,paid:0,denied:0,reversed:0,amtPaid:0},
+  const grpStats={'Vertically Integrated PBM':{total:0,paid:0,denied:0,reversed:0,amtPaid:0},
+                  'Switching Network':{total:0,paid:0,denied:0,reversed:0,amtPaid:0},
                   'Independent':{total:0,paid:0,denied:0,reversed:0,amtPaid:0}};
   remitData.forEach(r=>{
     const t=pbmType(String(r['Processor']||'').trim());
@@ -1396,7 +1647,7 @@ function buildPBMAnalysis(merged, allRows){
 
 function renderPBMSection(merged, allRows, pbm){
   const{clawbacks,belowNadac,belowNadacRows,lagList,grpStats,pbmDeniedAmt,totalClawback,totalBelowNadac,pbmToll}=pbm;
-  const bigPBM=grpStats['Big PBM'], indep=grpStats['Independent'];
+  const bigPBM=grpStats['Vertically Integrated PBM'], indep=grpStats['Independent'];
   const pbmPayRate=bigPBM.total?(bigPBM.paid/bigPBM.total*100):0;
   const pbmDenyRate=bigPBM.total?(bigPBM.denied/bigPBM.total*100):0;
   const indPayRate=indep.total?(indep.paid/indep.total*100):0;
@@ -1405,7 +1656,7 @@ function renderPBMSection(merged, allRows, pbm){
 
   document.getElementById('pbmAlertText').innerHTML=
     `<strong>Estimated PBM impact this period: ${$m(pbmToll)}.</strong>
-     Big PBMs deny <strong>${pbmDenyRate.toFixed(1)}%</strong> of claims vs
+     Vertically Integrated PBMs deny <strong>${pbmDenyRate.toFixed(1)}%</strong> of claims vs
      <strong>${indDenyRate.toFixed(1)}%</strong> for independent processors — a
      <strong>${(pbmDenyRate/Math.max(indDenyRate,0.1)).toFixed(0)}×</strong> higher denial rate.
      CVS Caremark alone clawed back <strong>${$m(cvsCB?.total||0)}</strong> after initially paying it.`;
@@ -1423,7 +1674,7 @@ function renderPBMSection(merged, allRows, pbm){
     {label:'Pay Rate',    pbmV:pbmPayRate, indV:indPayRate, fmt:v=>v.toFixed(1)+'%', goodHigh:true},
     {label:'Denial Rate', pbmV:pbmDenyRate,indV:indDenyRate,fmt:v=>v.toFixed(1)+'%', goodHigh:false},
     {label:'Avg Pmt Lag',
-      pbmV:lagList.filter(l=>l.type==='Big PBM').reduce((s,l,_,a)=>s+l.avg/a.length,0),
+      pbmV:lagList.filter(l=>l.type==='Vertically Integrated PBM').reduce((s,l,_,a)=>s+l.avg/a.length,0),
       indV:lagList.filter(l=>l.type==='Independent').reduce((s,l,_,a)=>s+l.avg/a.length,0),
       fmt:v=>v.toFixed(1)+' d', goodHigh:false},
   ];
@@ -1434,7 +1685,7 @@ function renderPBMSection(merged, allRows, pbm){
       <div class="pbm-compare-label">${row.label}</div>
       <div class="pbm-compare-bars">
         <div class="pbm-bar-line">
-          <div class="pbm-bar-name" style="color:${pbmBad?'#ff8080':'#f4a025'}">Big PBMs</div>
+          <div class="pbm-bar-name" style="color:${pbmBad?'#ff8080':'#f4a025'}">Vertically Integrated PBMs</div>
           <div class="pbm-bar-track"><div class="pbm-bar-fill" style="width:${(row.pbmV/mx*100).toFixed(1)}%;background:${pbmBad?'#C0392B':'#f4a025'}"></div></div>
           <div class="pbm-bar-val" style="color:${pbmBad?'#ff8080':'#f4a025'}">${row.fmt(row.pbmV)}</div>
         </div>
@@ -1977,7 +2228,57 @@ function wireClickHandlers(merged, insRx, allRows, sMap, so, procs, topGap, loss
   document.getElementById('alertRed')?.addEventListener('click',()=>
     showDrillDown('Actionable Unpaid Claims','All prescriptions with outstanding insurance balance',merged.filter(r=>r.gap>0),'insurance'));
   document.getElementById('alertRed').style.cursor='pointer';
+
+  // ── Extended analytics click handlers ──
+  // Copay donut
+  if(charts.copayDonut){
+    charts.copayDonut.options.onClick=(evt,els)=>{
+      if(!els.length) return;
+      const hasCopay=els[0].index===0;
+      const rows=insRx.filter(r=>hasCopay?N(r['Copay / Patient Pay'])>0:!(N(r['Copay / Patient Pay'])>0));
+      const mRows=rows.map(r=>{const m=merged.find(x=>String(x.rxNum||'').trim()===String(r['Rx Number']||'').trim().replace(/\.0$/,''));return m||null;}).filter(Boolean);
+      showDrillDown(hasCopay?'Copay Collected':'No Copay / Waived',`${NF(rows.length)} insurance Rx`,mRows,'insurance');
+    };
+    charts.copayDonut.update();
+  }
+
+  // Claim age bars
+  const ageKeys2=['0–30 days','31–60 days','61–90 days','91+ days'];
+  if(charts.ageBar){
+    charts.ageBar.options.onClick=(evt,els)=>{
+      if(!els.length) return;
+      const key=ageKeys2[els[0].index];
+      const today2=new Date();
+      const rows=merged.filter(r=>{
+        if(r.gap<=0||!r.date) return false;
+        const d=new Date(r.date);if(isNaN(d)) return false;
+        const days=Math.floor((today2-d)/864e5);
+        return key==='0–30 days'?days<=30:key==='31–60 days'?days<=60&&days>30:key==='61–90 days'?days<=90&&days>60:days>90;
+      });
+      showDrillDown(`Unpaid Claims: ${key}`,`${NF(rows.length)} unpaid prescriptions`,rows,'insurance');
+    };
+    charts.ageBar.update();
+  }
+
+  // Qty bar
+  if(charts.qtyBar){
+    const qLabs2=Object.keys({'1–30':1,'31–60':1,'61–90':1,'91–180':1,'181+':1});
+    const qtyMap2={};
+    allRows.forEach(r=>{qtyMap2[String(r['Rx Number']||'').trim().replace(/\.0$/,'')]=N(r['Quan.']);});
+    charts.qtyBar.options.onClick=(evt,els)=>{
+      if(!els.length) return;
+      const label=charts.qtyBar.data.labels[els[0].index];
+      const [lo,hi]=label==='181+'?[181,99999]:label.split('–').map(Number);
+      const rows=merged.filter(r=>{
+        const qty=qtyMap2[String(r.rxNum||'').trim().replace(/\.0$/,'')]||0;
+        return qty>=lo&&qty<=(hi||lo);
+      });
+      showDrillDown(`Quantity ${label}`,`${NF(rows.length)} insurance Rx`,rows,'insurance');
+    };
+    charts.qtyBar.update();
+  }
 }
+
 
 </script>
 <!-- ═══ DRILL-DOWN PANEL ═══ -->
