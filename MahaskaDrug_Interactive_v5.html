@@ -1451,11 +1451,11 @@ function renderPBMSection(merged, allRows, pbm){
   const cl=document.getElementById('clawbackList');cl.innerHTML='';
   clawbacks.slice(0,8).forEach((c,i)=>{
     const tag=c.pbm?`<span class="badge br" style="font-size:0.6rem;padding:1px 5px;margin-left:4px">PBM</span>`:'';
-    cl.innerHTML+=`<li class="di clickable" id="cb-row-${i}">
+    cl.insertAdjacentHTML('beforeend',`<li class="di clickable" id="cb-row-${i}">
       <div class="dr">${i+1}</div>
       <div><div class="dn">${c.proc}${tag}</div><div class="ds">${NF(c.count)} reversals clawed back</div></div>
       <div class="dv" style="color:#ff8080">−${$m(c.total)}</div>
-    </li>`;
+    </li>`);
     document.getElementById(`cb-row-${i}`)?.addEventListener('click',()=>{
       const rows=c.rows.map(r=>({
         date:r['PaymentDate']||null, rxNum:String(r['Rx']||''), drug:nadacDrugName(r['Rx'],allRows),
@@ -1474,11 +1474,11 @@ function renderPBMSection(merged, allRows, pbm){
   const bn=document.getElementById('belowNadacList');bn.innerHTML='';
   belowNadac.slice(0,8).forEach((b,i)=>{
     const tag=b.pbm?`<span class="badge br" style="font-size:0.6rem;padding:1px 5px;margin-left:4px">PBM</span>`:'';
-    bn.innerHTML+=`<li class="di clickable" id="bn-row-${i}">
+    bn.insertAdjacentHTML('beforeend',`<li class="di clickable" id="bn-row-${i}">
       <div class="dr">${i+1}</div>
       <div><div class="dn">${b.proc}${tag}</div><div class="ds">${NF(b.count)} Rx paid below NADAC</div></div>
       <div class="dv" style="color:#ff8080">−${$m(b.shortfall)}</div>
-    </li>`;
+    </li>`);
     document.getElementById(`bn-row-${i}`)?.addEventListener('click',()=>{
       const rows=belowNadacRows.filter(r=>r.proc===b.proc).map(r=>({
         date:r['FillDate']||null, rxNum:String(r['Rx']||''), drug:r.drug,
@@ -1705,6 +1705,15 @@ async function deleteSaved(id){
 }
 
 // Initialise saved list on page load
+// Storage shim: use window.storage if available (Claude.ai), else fall back to localStorage
+if(!window.storage){
+  window.storage={
+    get:async(key)=>{const v=localStorage.getItem(key);return v?{key,value:v}:null;},
+    set:async(key,val)=>{localStorage.setItem(key,val);return{key,value:val};},
+    delete:async(key)=>{localStorage.removeItem(key);return{key,deleted:true};}
+  };
+}
+
 initSavedList();
 
 setupDrop('dropFilled','fileFilled','filledName','filled');
