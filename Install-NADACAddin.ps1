@@ -1,14 +1,27 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Installs the Pharmacy Tools Excel Add-In (NADAC Lookup) v2.3.5
+    Installs the Pharmacy Tools Excel Add-In (NADAC Lookup) v2.3.6
 
 .DESCRIPTION
     Builds an Excel .xlam add-in containing:
-      - modNADAC          : NADAC Lookup main module (v2.3.5)
-      - frmDatasetManager : Full Dataset Manager UserForm (v2.3.5)
+      - modNADAC          : NADAC Lookup main module (v2.3.6)
+      - frmDatasetManager : Full Dataset Manager UserForm (v2.3.6)
     Then injects a custom ribbon tab and pharmacy-bottle icon.
     Registers the add-in so it loads automatically in Excel.
+
+    v2.3.6 (2026-04-09):
+      - Critical fix: sort parameter in POST body changed from "sort"
+        (singular, silently ignored by the API) to "sorts" (plural,
+        the correct DKAN query API key). The wrong key caused the API
+        to return records in default insertion order (oldest first),
+        so BestRecord() always found the oldest rate (2024-12-18)
+        instead of the most recent one (2026-04-08). This was the
+        root cause of stale effective dates despite correct data
+        existing in the 2026 dataset.
+      - Added verbose diagnostic logging: POST URL, date ceiling,
+        first effective_date from raw response, record count per
+        batch, and response previews on empty/unexpected results.
 
     v2.3.5 (2026-04-09):
       - Fix: POST now uses dataset-ID/index endpoint
@@ -65,7 +78,7 @@ $ErrorActionPreference = 'Stop'
 
 Write-Host ''
 Write-Host '  =====================================================' -ForegroundColor Cyan
-Write-Host '   Pharmacy Tools Add-In  --  Installer  v2.3.5'        -ForegroundColor Cyan
+Write-Host '   Pharmacy Tools Add-In  --  Installer  v2.3.6'        -ForegroundColor Cyan
 Write-Host '  =====================================================' -ForegroundColor Cyan
 Write-Host ''
 
@@ -127,7 +140,7 @@ $VbaCode = @'
 Option Explicit
 
 ' --- Version ------------------------------------------------------------------
-Public  Const ADDIN_VERSION    As String = "2.3.5"
+Public  Const ADDIN_VERSION    As String = "2.3.6"
 Private Const ADDIN_BUILD_DATE As String = "2026-04-09"
 
 ' Module-level: tracks last HTTP status so callers can detect 400 vs network error
@@ -394,6 +407,7 @@ Public Sub RunLookup()
         Dim maxDt As Date : maxDt = CDate(yearMaxDt(yr))
         LogLine "  Year=" & yr & "  dsID=" & dsID & _
                 "  NDCs=" & cnt & "  maxDt=" & Format(maxDt, "yyyy-mm-dd")
+        LogLine "  POST URL: " & postUrl
 
         Dim bi As Long
         For bi = 0 To Int((cnt + BATCH_SIZE - 1) / BATCH_SIZE) - 1
@@ -416,7 +430,9 @@ Public Sub RunLookup()
 
             Dim resp As String : resp = ""
             Dim body As String : body = BuildPostBody(bNDCs, maxDt)
-            LogLine "  POST batch " & (bi + 1) & "  NDCs=" & Join(bNDCs, ",")
+            LogLine "  Batch " & (bi + 1) & "  NDCs=" & (bEnd - bStart + 1) & _
+                    "  ceiling=" & Format(maxDt, "yyyy-mm-dd") & _
+                    "  url=" & postUrl
             resp = HttpPost(postUrl, body)
 
             ' On 400: resolve distribution UUID and retry once.
@@ -433,6 +449,8 @@ Public Sub RunLookup()
                         distUUID = freshUUID
                         knownDist(dsID) = freshUUID
                         LogLine "  Resolved distribution UUID: " & freshUUID
+                    Else
+                        LogLine "  FetchDistUUID returned empty -- no UUID fallback available"
                     End If
                 End If
                 If distUUID <> "" Then
@@ -440,13 +458,41 @@ Public Sub RunLookup()
                     PauseMs RATE_MS
                     resp = HttpPost(API_BASE & distUUID, body)
                 End If
+                ' Restore progress bar now that the fallback is complete
+                Application.StatusBar = "NADAC Lookup  |  " & yr & "  Batch " & (bi + 1) & _
+                                        "/" & Int((cnt + BATCH_SIZE - 1) / BATCH_SIZE) & _
+                                        "  [" & ProgBar(batchsDone - 1, totalBatches, 22) & "]  " & pct & "%"
+                DoEvents
             End If
 
             If resp <> "" Then
+                ' Log the first effective_date from the raw response so stale
+                ' dates are immediately visible in the log without further parsing.
+                Dim dtTag As String : dtTag = """effective_date"":"""
+                Dim dtP   As Long   : dtP   = InStr(1, resp, dtTag, vbBinaryCompare)
+                If dtP > 0 Then
+                    Dim dtS2 As Long : dtS2 = dtP + Len(dtTag)
+                    Dim dtE2 As Long : dtE2 = dtS2
+                    Do While dtE2 <= Len(resp)
+                        If Mid(resp, dtE2, 1) = """" Then Exit Do
+                        dtE2 = dtE2 + 1
+                    Loop
+                    LogLine "  First effective_date in response: " & Mid(resp, dtS2, dtE2 - dtS2)
+                Else
+                    LogLine "  No effective_date field found in response (unexpected format)"
+                    LogLine "  Response[0:200]: " & Left(resp, 200)
+                End If
+
                 Dim arrStr As String : arrStr = ExtractResultsArray(resp)
                 If arrStr <> "" And arrStr <> "[]" Then
+                    Dim recCnt As Long : recCnt = RecordCount(arrStr)
+                    LogLine "  Records parsed: " & recCnt & _
+                            IIf(recCnt >= API_LIMIT, "  *** HIT LIMIT=" & API_LIMIT & " -- results may be truncated ***", "")
                     ParseIntoCache arrStr, apiCache
-                    If RecordCount(arrStr) >= API_LIMIT Then truncWarn = True
+                    If recCnt >= API_LIMIT Then truncWarn = True
+                Else
+                    LogLine "  Response array empty or missing -- 0 records cached for this batch"
+                    LogLine "  Response[0:200]: " & Left(resp, 200)
                 End If
             Else
                 ' Both POST paths failed — fall back to GET per NDC
@@ -468,8 +514,18 @@ NextYear:
     Next yi
 
     ' -- Assign output columns (AFTER Pass 1 to avoid column-shift bug) --------
-    colNPU = EnsureCol(ws, "NADAC")
-    colED  = EnsureCol(ws, "NADAC Effective Date")
+    ' When the columns don't yet exist (first run on a fresh data extract),
+    ' insert them immediately after the Cost column rather than appending to
+    ' the far end of the sheet. Falls back to append if Cost isn't found.
+    Dim costAnchor As Long
+    costAnchor = FindHeaderCol(ws, Array("Cost", "Dispense Cost", "Drug Cost", "Rx Cost"))
+    If costAnchor = 0 Then
+        colNPU = EnsureCol(ws, "NADAC")
+        colED  = EnsureCol(ws, "NADAC Effective Date")
+    Else
+        colNPU = EnsureColAfter(ws, "NADAC", costAnchor)
+        colED  = EnsureColAfter(ws, "NADAC Effective Date", colNPU)
+    End If
 
     ' -- Pass 2: write results -------------------------------------------------
     Application.StatusBar = "NADAC Lookup  |  Writing results..."
@@ -602,7 +658,7 @@ Public Sub ShowAbout()
     s = s & "  " & String(46, "-")                                             & nl & nl
     s = s & "  Developed by:"                                                  & nl
     s = s & "    Jeremiah Maudlin"                                             & nl
-    s = s & "    Omega Integrated Management"                                  & nl
+    s = s & "    omegaIM & E" & Chr(178) & " Construction, llc"               & nl
     s = s & "    jmaudlin@omegaim.com"                                         & nl
     s = s & "    +1 (641) 660-6367"                                            & nl & nl
     s = s & "  Data source:  data.medicaid.gov"                                & nl
@@ -623,11 +679,11 @@ End Sub
 '
 Public Sub AddNADACCalculations()
     On Error GoTo ErrHandler
-    LogLine "=== NADAC Calculations v" & ADDIN_VERSION & " started ==="
+    LogLine "=== Cost Calculations v" & ADDIN_VERSION & " started ==="
 
     Dim wb As Workbook : Set wb = ActiveWorkbook
     If wb Is Nothing Then
-        MsgBox "Please open a workbook first.", vbExclamation, "NADAC Calculations"
+        MsgBox "Please open a workbook first.", vbExclamation, "Cost Calculations"
         Exit Sub
     End If
 
@@ -635,7 +691,7 @@ Public Sub AddNADACCalculations()
     Dim lastRow As Long
     lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
     If lastRow < 2 Then
-        MsgBox "No data rows found on the active sheet.", vbExclamation, "NADAC Calculations"
+        MsgBox "No data rows found on the active sheet.", vbExclamation, "Cost Calculations"
         Exit Sub
     End If
 
@@ -644,7 +700,7 @@ Public Sub AddNADACCalculations()
     nadacCol = FindHeaderCol(ws, Array("NADAC"))
     If nadacCol = 0 Then
         MsgBox "NADAC column not found." & vbCrLf & _
-               "Please run NADAC Lookup first.", vbExclamation, "NADAC Calculations"
+               "Please run NADAC Lookup first.", vbExclamation, "Cost Calculations"
         Exit Sub
     End If
 
@@ -653,7 +709,7 @@ Public Sub AddNADACCalculations()
     nadacEdCol = FindHeaderCol(ws, Array("NADAC Effective Date"))
     If nadacEdCol = 0 Then
         MsgBox "NADAC Effective Date column not found." & vbCrLf & _
-               "Please run NADAC Lookup first.", vbExclamation, "NADAC Calculations"
+               "Please run NADAC Lookup first.", vbExclamation, "Cost Calculations"
         Exit Sub
     End If
 
@@ -663,12 +719,12 @@ Public Sub AddNADACCalculations()
     If qtyCol = 0 Then
         Dim qi As String
         qi = InputBox("Quantity column not auto-detected." & vbCrLf & _
-                      "Enter the column letter  (e.g.  C):", "NADAC Calculations", "C")
+                      "Enter the column letter  (e.g.  C):", "Cost Calculations", "C")
         If qi = "" Then Exit Sub
         On Error Resume Next
         qtyCol = ws.Range(UCase(Trim(qi)) & "1").Column
         On Error GoTo ErrHandler
-        If qtyCol = 0 Then MsgBox "Invalid column.", vbCritical, "NADAC Calculations" : Exit Sub
+        If qtyCol = 0 Then MsgBox "Invalid column.", vbCritical, "Cost Calculations" : Exit Sub
     End If
 
     ' -- Locate Cost column ----------------------------------------------------
@@ -677,12 +733,12 @@ Public Sub AddNADACCalculations()
     If costCol = 0 Then
         Dim ci As String
         ci = InputBox("Cost column not auto-detected." & vbCrLf & _
-                      "Enter the column letter  (e.g.  E):", "NADAC Calculations", "E")
+                      "Enter the column letter  (e.g.  E):", "Cost Calculations", "E")
         If ci = "" Then Exit Sub
         On Error Resume Next
         costCol = ws.Range(UCase(Trim(ci)) & "1").Column
         On Error GoTo ErrHandler
-        If costCol = 0 Then MsgBox "Invalid column.", vbCritical, "NADAC Calculations" : Exit Sub
+        If costCol = 0 Then MsgBox "Invalid column.", vbCritical, "Cost Calculations" : Exit Sub
     End If
 
     ' -- Locate Retail column --------------------------------------------------
@@ -691,16 +747,16 @@ Public Sub AddNADACCalculations()
     If retailCol = 0 Then
         Dim ri As String
         ri = InputBox("Retail column not auto-detected." & vbCrLf & _
-                      "Enter the column letter  (e.g.  K):", "NADAC Calculations", "K")
+                      "Enter the column letter  (e.g.  K):", "Cost Calculations", "K")
         If ri = "" Then Exit Sub
         On Error Resume Next
         retailCol = ws.Range(UCase(Trim(ri)) & "1").Column
         On Error GoTo ErrHandler
-        If retailCol = 0 Then MsgBox "Invalid column.", vbCritical, "NADAC Calculations" : Exit Sub
+        If retailCol = 0 Then MsgBox "Invalid column.", vbCritical, "Cost Calculations" : Exit Sub
     End If
 
     ' -- Confirm ---------------------------------------------------------------
-    If MsgBox("NADAC Calculations  --  Ready to run." & vbCrLf & vbCrLf & _
+    If MsgBox("Cost Calculations  --  Ready to run." & vbCrLf & vbCrLf & _
               "  NADAC column       :  " & ColLtr(nadacCol)  & "  (""" & ws.Cells(1, nadacCol).Value  & """)" & vbCrLf & _
               "  NADAC Eff. Date    :  " & ColLtr(nadacEdCol) & vbCrLf & _
               "  Quantity           :  " & ColLtr(qtyCol)    & "  (""" & ws.Cells(1, qtyCol).Value    & """)" & vbCrLf & _
@@ -709,7 +765,7 @@ Public Sub AddNADACCalculations()
               "  Data rows          :  " & (lastRow - 1) & vbCrLf & vbCrLf & _
               "Three columns will be inserted after """ & ws.Cells(1, nadacEdCol).Value & """:" & vbCrLf & _
               "   NADAC Based Cost  |  NADAC Calculated Margin  |  Actual Cost" & vbCrLf & vbCrLf & _
-              "Click OK to begin.", vbOKCancel + vbInformation, "NADAC Calculations") = vbCancel Then
+              "Click OK to begin.", vbOKCancel + vbInformation, "Cost Calculations") = vbCancel Then
         Exit Sub
     End If
 
@@ -761,43 +817,49 @@ Public Sub AddNADACCalculations()
 
     Application.ScreenUpdating = False
     Application.Calculation    = xlCalculationManual
+    Application.StatusBar = "Cost Calculations  |  Writing formulas..."
+    DoEvents
 
-    Dim r As Long
-    For r = 2 To lastRow
-        Dim rS As String : rS = CStr(r)
+    ' Write each formula once to row 2, then FillDown to all data rows.
+    ' FillDown adjusts relative row references automatically (F2*C2 → F3*C3 etc.)
+    ' and runs natively in Excel — far faster than writing each cell from VBA.
 
-        ' NADAC Based Cost = NADAC per unit x Quantity
-        ws.Cells(r, baseCostCol).Value        = "=" & nC & rS & "*" & qC & rS
-        ws.Cells(r, baseCostCol).NumberFormat = "$#,##0.0000"
+    ' NADAC Based Cost = NADAC per unit x Quantity
+    ws.Cells(2, baseCostCol).Value        = "=" & nC & "2*" & qC & "2"
+    ws.Cells(2, baseCostCol).NumberFormat = "$#,##0.0000"
+    ws.Range(ws.Cells(2, baseCostCol), ws.Cells(lastRow, baseCostCol)).FillDown
 
-        ' NADAC Calculated Margin = (NADAC x Qty) - Retail
-        ws.Cells(r, marginCol).Value        = "=(" & nC & rS & "*" & qC & rS & ")-" & kC & rS
-        ws.Cells(r, marginCol).NumberFormat = "$#,##0.00"
+    ' NADAC Calculated Margin = (NADAC x Qty) - Retail
+    ws.Cells(2, marginCol).Value        = "=(" & nC & "2*" & qC & "2)-" & kC & "2"
+    ws.Cells(2, marginCol).NumberFormat = "$#,##0.00"
+    ws.Range(ws.Cells(2, marginCol), ws.Cells(lastRow, marginCol)).FillDown
 
-        ' Actual Cost: fall back to original Cost when NADAC lookup returned a
-        ' failure message (text length > 10); otherwise use NADAC Based Cost.
-        ws.Cells(r, actCostCol).Value        = "=IF(IF(LEN(" & nC & rS & ")>10,-1,0)=-1," & eC & rS & "," & hC & rS & ")"
-        ws.Cells(r, actCostCol).NumberFormat = "$#,##0.00"
-    Next r
+    ' Actual Cost: fall back to original Cost when NADAC lookup returned a
+    ' failure message (text length > 10); otherwise use NADAC Based Cost.
+    ws.Cells(2, actCostCol).Value        = "=IF(IF(LEN(" & nC & "2)>10,-1,0)=-1," & eC & "2," & hC & "2)"
+    ws.Cells(2, actCostCol).NumberFormat = "$#,##0.00"
+    ws.Range(ws.Cells(2, actCostCol), ws.Cells(lastRow, actCostCol)).FillDown
 
+    Application.StatusBar      = False
     Application.ScreenUpdating = True
     Application.Calculation    = xlCalculationAutomatic
 
-    LogLine "  NADAC Calculations complete: " & (lastRow - 1) & " rows"
-    MsgBox "NADAC Calculations complete." & vbCrLf & vbCrLf & _
+    LogLine "  Cost Calculations complete: " & (lastRow - 1) & " rows"
+    MsgBox "Cost Calculations complete." & vbCrLf & vbCrLf & _
            "  Rows updated  :  " & (lastRow - 1) & vbCrLf & vbCrLf & _
            "Columns added / updated:" & vbCrLf & _
            "   " & ColLtr(baseCostCol) & "  NADAC Based Cost" & vbCrLf & _
            "   " & ColLtr(marginCol)   & "  NADAC Calculated Margin" & vbCrLf & _
            "   " & ColLtr(actCostCol)  & "  Actual Cost", _
-           vbInformation, "NADAC Calculations"
+           vbInformation, "Cost Calculations"
     Exit Sub
 
 ErrHandler:
     Application.ScreenUpdating = True
     Application.Calculation    = xlCalculationAutomatic
+    Application.StatusBar      = False
     LogLine "ERROR " & Err.Number & ": " & Err.Description
-    MsgBox "Error " & Err.Number & ": " & Err.Description, vbCritical, "NADAC Calculations"
+    MsgBox "Error " & Err.Number & ": " & Err.Description, vbCritical, "Cost Calculations"
 End Sub
 
 ' --- Discover dataset ID for a year not in the hardcoded table ----------------
@@ -839,13 +901,18 @@ Private Function BuildPostBody(ndcs() As String, maxDt As Date) As String
         conds = conds & "{""property"":""ndc"",""value"":""" & ndcs(i) & """,""operator"":""=""}"
     Next i
     Dim dtS As String : dtS = Format(maxDt, "yyyy-mm-dd") & "T23:59:59"
+    ' Sort by effective_date DESC only.
+    ' This ensures BestRecord() finds the most recent rate <= dispense date.
+    ' A secondary ndc sort is unnecessary (BestRecord operates on per-NDC
+    ' cached data) and caused 400 errors when the ndc entry had no explicit
+    ' "order" field and the API started validating the sorts parameter.
     BuildPostBody = "{" & _
         """conditions"":[" & _
             "{""groupOperator"":""or"",""conditions"":[" & conds & "]}," & _
             "{""property"":""effective_date"",""value"":""" & dtS & """,""operator"":""<=""}" & _
         "]," & _
         """limit"":" & API_LIMIT & "," & _
-        """sort"":[{""property"":""ndc""},{""property"":""effective_date"",""order"":""desc""}]" & _
+        """sorts"":[{""property"":""effective_date"",""order"":""desc""}]" & _
         "}"
 End Function
 
@@ -1187,6 +1254,22 @@ Private Function EnsureCol(ws As Worksheet, hdr As String) As Long
     EnsureCol = lc
 End Function
 
+' --- Find column or INSERT it immediately after a reference column -----------
+' Unlike EnsureCol, this preserves the logical column order on first use
+' instead of appending to the far right of the sheet.
+Private Function EnsureColAfter(ws As Worksheet, hdr As String, afterCol As Long) As Long
+    Dim f As Long : f = FindHeaderCol(ws, Array(hdr))
+    If f > 0 Then EnsureColAfter = f : Exit Function
+    ' Column doesn't exist -- insert it right after afterCol
+    Dim insertAt As Long : insertAt = afterCol + 1
+    ws.Columns(insertAt).Insert Shift:=xlToRight
+    With ws.Cells(1, insertAt)
+        .Value = hdr
+        .Font.Bold = True
+    End With
+    EnsureColAfter = insertAt
+End Function
+
 ' --- ASCII block progress bar ------------------------------------------------
 Private Function ProgBar(curr As Long, tot As Long, w As Long) As String
     If tot = 0 Then ProgBar = String(w, "-") : Exit Function
@@ -1482,11 +1565,11 @@ $RibbonXml = @'
                   screentip="NADAC Lookup"
                   supertip="Query the CMS Medicaid NADAC API and populate NADAC and NADAC Effective Date for each row." />
           <button id="btnNADACCalcs"
-                  label="NADAC Calculations"
+                  label="Cost Calculations"
                   image="rIdImg2"
-                  size="normal"
+                  size="large"
                   onAction="RunNADACCalcs"
-                  screentip="NADAC Calculations"
+                  screentip="Cost Calculations"
                   supertip="Add NADAC Based Cost, NADAC Calculated Margin, and Actual Cost columns. Run after NADAC Lookup." />
         </group>
         <group id="grpTools" label="Tools">
@@ -1721,18 +1804,16 @@ try {
 Write-Host ''
 Write-Host '  =====================================================' -ForegroundColor Green
 Write-Host '   Pharmacy Tools Add-In installed successfully!'        -ForegroundColor Green
-Write-Host '   Version 2.3.5'                                        -ForegroundColor Green
+Write-Host '   Version 2.3.6'                                        -ForegroundColor Green
 Write-Host '  =====================================================' -ForegroundColor Green
 Write-Host ''
-Write-Host '  What is new in v2.3.5:' -ForegroundColor White
-Write-Host '    - Fix: NADAC Lookup now uses the stable dataset-ID/index'
-Write-Host '      POST endpoint instead of the rotating distribution UUID.'
-Write-Host '      This resolves stale effective dates caused by the 2026'
-Write-Host '      dataset UUID rotating on every weekly CMS refresh.'
-Write-Host '    - Fix: NADAC Calculations now inserts columns immediately'
-Write-Host '      after NADAC Effective Date (before Retail).'
-Write-Host '    - Fix: FetchDistUUID parser now handles both JSON formats'
-Write-Host '      and is whitespace-tolerant (kept as 400 fallback only).'
+Write-Host '  What is new in v2.3.6:' -ForegroundColor White
+Write-Host '    - Critical fix: NADAC rates now return current 2026 dates.'
+Write-Host '      Root cause: POST body used "sort" (singular) which the'
+Write-Host '      DKAN API silently ignores. Changed to "sorts" (plural).'
+Write-Host '      Records now return in effective_date DESC order so the'
+Write-Host '      most recent rate is matched, not the oldest.'
+Write-Host '    - Verbose diagnostic logging added to lookup log file.'
 Write-Host ''
 Write-Host '  Next steps:' -ForegroundColor White
 Write-Host '    1. Open Excel'
